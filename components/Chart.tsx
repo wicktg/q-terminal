@@ -29,6 +29,8 @@ const WS_BASE = "wss://fstream.binance.com/market/ws"; // the old /ws path still
 const PULSE_MS = 5000;
 const POLL_AFTER_MS = 12e3; // no ticks for this long means the feed is the poll, not the socket
 const RECONNECT_AFTER_MS = 30e3;
+const VIEW_BARS = 160;
+const REST_OFFSET = 8;
 const HL_WS = "wss://api.hyperliquid.xyz/ws";
 const HL_PING_MS = 30e3; // Hyperliquid drops sockets that stay silent for a minute
 const FILL_GROUP_MS = 150; // one order arrives as many fills, across more than one message
@@ -340,7 +342,7 @@ export default function Chart({ sym, analysis, onPrice, marks }: Props) {
       grid: { vertLines: { color: "#0e0e0e" }, horzLines: { color: "#0e0e0e" } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#444", labelBackgroundColor: "#2c2c2c" }, horzLine: { color: "#444", labelBackgroundColor: "#2c2c2c" } },
       rightPriceScale: { borderColor: "#1e1e1e" },
-      timeScale: { borderColor: "#1e1e1e", timeVisible: true, secondsVisible: false, rightOffset: 8 },
+      timeScale: { borderColor: "#1e1e1e", timeVisible: true, secondsVisible: false, rightOffset: REST_OFFSET },
     });
     const line = (color: string, width: 1 | 2, pane = 0, style: LineStyle = LineStyle.Solid) =>
       chart.addSeries(LineSeries, { color, lineWidth: width, lineStyle: style, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }, pane);
@@ -535,10 +537,7 @@ export default function Chart({ sym, analysis, onPrice, marks }: Props) {
       for (const o of orders.values()) {
         const px = o.usd / o.sz;
         layer.hit(px, o.buy);
-        if (o.usd < minRef.current) continue;
-        const at = o.time / 1000;
-        const size = Math.min(14, 2.5 + 3.5 * Math.log10(1 + o.usd / Math.max(1, minRef.current)));
-        layer.add({ px, usd: o.usd, buy: o.buy, t: Math.floor(at / sec) * sec, frac: (at % sec) / sec, size });
+        if (o.usd >= minRef.current) layer.add({ px, usd: o.usd, buy: o.buy, t: Math.floor(o.time / 1000 / sec) * sec, min: minRef.current });
       }
       orders.clear();
     };
@@ -656,7 +655,14 @@ export default function Chart({ sym, analysis, onPrice, marks }: Props) {
         a?.candle.applyOptions({ priceFormat: { type: "price", precision: digits, minMove: 10 ** -digits } });
         // Dragging a price axis switches auto-scale off, which would strand the new coin off screen.
         if (a) for (const s of [a.candle, a.vol, a.cvdP, a.cvdS]) s.priceScale().applyOptions({ autoScale: true });
-        a?.chart.timeScale().setVisibleLogicalRange({ from: r.bars.length - 160, to: r.bars.length + 8 });
+        if (a) {
+          // HL FLOW opens a lane right of the live candle for fills to travel through.
+          const width = Math.max(320, a.chart.timeScale().width());
+          const lane = flow ? Math.min(260, Math.max(130, width * 0.34)) : 0;
+          const rightOffset = flow ? Math.round((VIEW_BARS * lane) / (width - lane)) : REST_OFFSET;
+          a.chart.timeScale().applyOptions({ rightOffset });
+          a.chart.timeScale().setVisibleLogicalRange({ from: r.bars.length - VIEW_BARS, to: r.bars.length + rightOffset });
+        }
       } catch {
         if (!dead) {
           if (flow) setFeed("NOT ON HL");
