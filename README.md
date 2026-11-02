@@ -23,6 +23,7 @@ Keys: `1`-`5` switch tabs, `/` focuses search.
 
 - Liquidation clusters are modelled from open-interest changes, not exchange data.
 - The website shows structure, zones and liquidity, not trade signals. The signal engine stays in `lib/` for research, and it has no proven edge.
+- Deploy outside the US. Binance rejects US servers with error 451, so `vercel.json` pins the functions to Mumbai.
 - HL FLOW switches the chart to Hyperliquid only: candles, fills and order book. Fills are grouped into orders, filtered by a dollar minimum and animated by `components/flow-layer.ts`. The depth rail shows the live book. The CVD pane stays on Binance taker flow, because Hyperliquid publishes no taker history, and the side panels still use the main feed.
 - Hosting on US servers (including default Vercel regions) will likely hit Binance's geo-block. Run it locally or host in an allowed region.
 
