@@ -1,6 +1,5 @@
 // One-time structure read for a coin, straight from the libs, so it works without the server running.
 import { analyze } from "../lib/analyze.ts";
-import { labRead } from "../lib/lab-live.ts";
 
 const sym = process.argv[2] ?? "ZEC";
 const a = await analyze(sym);
@@ -11,6 +10,3 @@ console.log("zones");
 for (const z of a.ta.zones) console.log(" ", z.tf, z.kind, z.side, z.bottom, z.top, `${z.dist.toFixed(1)}%`);
 console.log("pools");
 for (const p of a.ta.pools) console.log(" ", p.tf, p.side, p.price, p.touches, `${p.dist.toFixed(1)}%`);
-const l = await labRead(sym);
-console.log("LAB ranges", JSON.stringify(l.ranges));
-console.log("LAB signals", JSON.stringify(l.signals));

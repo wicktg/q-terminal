@@ -46,7 +46,7 @@ const toBar = (k: RawKline): Bar => ({
   tb: +k[9],
 });
 
-const TTL: Record<string, number> = { "5m": 15e3, "15m": 20e3, "1h": 30e3, "4h": 60e3, "1d": 120e3 };
+const TTL: Record<string, number> = { "5m": 15e3, "15m": 20e3, "30m": 30e3, "1h": 30e3, "4h": 60e3, "1d": 120e3 };
 // Short requests are the chart's live pulse, so they must not sit behind the history cache.
 const ttlFor = (tf: string, limit: number) => (limit <= 5 ? 2e3 : (TTL[tf] ?? 30e3));
 
@@ -65,7 +65,7 @@ export const spotKlines = (sym: string, tf: string, limit: number) =>
     }
   });
 
-const TF_MS: Record<string, number> = { "5m": 3e5, "15m": 9e5, "1h": 36e5, "4h": 144e5, "1d": 864e5 };
+const TF_MS: Record<string, number> = { "5m": 3e5, "15m": 9e5, "30m": 18e5, "1h": 36e5, "4h": 144e5, "1d": 864e5 };
 
 export const hlKlines = (sym: string, tf: string, limit: number) =>
   cached(`hlk:${sym}:${tf}:${limit}`, ttlFor(tf, limit), async () => {

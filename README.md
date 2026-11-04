@@ -17,7 +17,8 @@ Keys: `1`-`5` switch tabs, `/` focuses search.
 - `lib/model.ts`: forecast (bootstrap paths, analogs, walk-forward test) and the setup engine.
 - `lib/analyze.ts`: joins feeds and models into one per-coin bundle.
 - `lib/data.ts`: Binance, Hyperliquid and Bybit access with a TTL cache.
-- `components/Chart.tsx`: live chart. `components/Terminal.tsx`: everything else.
+- `lib/tpo.ts` and `lib/absorb.ts`: Market Profile and zone absorption, each pure and separate.
+- `components/Chart.tsx`: live chart. `components/TpoTab.tsx` and `components/AbsorbTab.tsx`: the TPO and ABSORB tabs. `components/Terminal.tsx`: everything else.
 
 ## Honest limits
 
@@ -25,7 +26,6 @@ Keys: `1`-`5` switch tabs, `/` focuses search.
 - The website shows structure, zones and liquidity, not trade signals. The signal engine stays in `lib/` for research, and it has no proven edge.
 - Deploy outside the US. Binance rejects US servers with error 451, so `vercel.json` pins the functions to Mumbai.
 - HL FLOW switches the chart to Hyperliquid only: candles, fills and order book. Fills are grouped into orders, filtered by a dollar minimum and animated by `components/flow-layer.ts`. The depth rail shows the live book. The CVD pane stays on Binance taker flow, because Hyperliquid publishes no taker history, and the side panels still use the main feed.
-- Hosting on US servers (including default Vercel regions) will likely hit Binance's geo-block. Run it locally or host in an allowed region.
 
 ## Backtest
 
@@ -62,9 +62,14 @@ OI, funding, liquidation clusters and long/short ratios are collected and shown 
 
 To retest: `scripts/mtf-search.ts <tf> smc` and `scripts/mtf-gates.ts <tf> smc` for 4h, 1h and 15m, then `scripts/ta-peek.ts` to read them and `scripts/ta-record.ts` to refresh `lib/lanes.ts` and `lib/ta-record.ts`.
 
-## Lab
+## Range rules
 
-`/lab` is a separate test area, reached from the LAB button in the main terminal. It tests range rules taken from @tradermatt's public posts, plus add-ons from traders in the same lane. `lib/lab.ts` holds the rules, `lib/lab-live.ts` the live read and `lib/lab-playbook.ts` the wording and sources. It shows ranges and tested results, not live signals.
+Range rules from public trader posts live in `lib/lab.ts`, and the multi-timeframe search tests them (`scripts/mtf-search.ts <tf> lab`). The LAB page that showed them live has been removed from the site. To pull posts again, put `TWITTERAPI_KEY` in `.env.local`, then run `scripts/x-fetch.ts <user> 30` and `scripts/x-digest.ts <user>`.
 
-To rerun: put `TWITTERAPI_KEY` in `.env.local`, then `scripts/x-fetch.ts <user> 30` and `scripts/x-digest.ts <user>`. Search caps at 500 posts, so busy accounts need a second pull with `UNTIL` set. Then `scripts/mtf-search.ts <tf> lab`, `scripts/mtf-gates.ts <tf> lab`, and `scripts/lab-record.ts` to refresh `lib/lab-record.ts`.
+## TPO
 
+The TPO tab draws a Market Profile for each UTC day from 30-minute bars: one letter per 30-minute period at every price it traded. It shows POC, value area (70% of time), initial balance, single prints, tails, poor highs and lows, profile shape, a 5-day composite and POCs price has not revisited. `lib/tpo.ts` holds the maths and `components/TpoTab.tsx` the view. The chart's TPO button draws the live POC, value area and nearby untested POCs as lines. Row size comes from the last three days, so the tab and the chart agree.
+
+## Absorption
+
+The ABSORB tab measures how much aggressive flow each 1H and 4H zone has soaked up: market sells into demand, market buys into supply. It uses Binance perp and spot taker data on 15-minute bars, split by how much of each bar sat in the zone. It also lists bars in the heaviest tenth of one-sided flow where price still failed to move, which shows passive orders absorbing. `lib/absorb.ts` holds the maths and `components/AbsorbTab.tsx` the view. It cannot see what is still resting in the book.

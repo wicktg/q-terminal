@@ -1,7 +1,9 @@
 "use client";
 import dynamic from "next/dynamic";
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AbsorbTab from "./AbsorbTab.tsx";
+import TpoTab from "./TpoTab.tsx";
+import { useJson } from "./use-json.ts";
 import type { Analysis, Book, Forecast, Frame, NewsItem, NewsResp, ScreenerRow, UniverseCoin } from "@/lib/types.ts";
 import { fmtPct, fmtPx, fmtUsd, toneClass } from "@/lib/format.ts";
 
@@ -10,38 +12,8 @@ const Chart = dynamic(() => import("./Chart"), { ssr: false });
 const DEFAULT_LIST = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "NEAR", "ENA", "LIT", "DOGE", "SUI", "LINK", "1000PEPE", "AERO", "VVV", "UNI"];
 // Applied once to watchlists saved earlier, so a later manual add or remove sticks.
 const LIST_CHANGES = ["+1000PEPE", "+AERO", "+VVV", "+UNI", "-AVAX", "-XRP", "-BNB"];
-const TABS = ["CHART", "ZONES", "SCAN", "NEWS", "CONTEXT"] as const;
+const TABS = ["CHART", "ZONES", "TPO", "ABSORB", "SCAN", "NEWS", "CONTEXT"] as const;
 type Tab = (typeof TABS)[number];
-
-function useJson<T>(url: string | null, ms: number) {
-  const [data, setData] = useState<T | null>(null);
-  const [err, setErr] = useState(false);
-  useEffect(() => {
-    if (!url) return;
-    let dead = false;
-    setData(null);
-    const go = async () => {
-      try {
-        const r = await fetch(url);
-        if (!r.ok) throw new Error();
-        const j = (await r.json()) as T;
-        if (!dead) {
-          setData(j);
-          setErr(false);
-        }
-      } catch {
-        if (!dead) setErr(true);
-      }
-    };
-    go();
-    const id = setInterval(go, ms);
-    return () => {
-      dead = true;
-      clearInterval(id);
-    };
-  }, [url, ms]);
-  return { data, err };
-}
 
 const Loading = ({ err }: { err?: boolean }) => <div className="note">{err ? "Feed unavailable. Retrying." : "Loading…"}</div>;
 
@@ -519,7 +491,6 @@ export default function Terminal() {
             <kbd>{i + 1}</kbd>{t}
           </button>
         ))}
-        <Link className="tab lab-link" href="/lab">LAB</Link>
         {top && (
           <button className="ticker" onClick={() => setTab("NEWS")} title={top.title}>
             <span className={biasClass(top.bias)}>{top.category}</span> {top.title}
@@ -544,7 +515,7 @@ export default function Terminal() {
           </div>
         </aside>
 
-        <main className={`main ${tab === "CHART" ? "fill" : ""}`}>
+        <main className={`main ${tab === "CHART" || tab === "TPO" ? "fill" : ""}`}>
           {tab === "CHART" && (
             <>
               <Chart sym={sym} analysis={a} onPrice={setLive} />
@@ -552,6 +523,8 @@ export default function Terminal() {
             </>
           )}
           {tab === "ZONES" && <Zones sym={sym} a={a} />}
+          {tab === "TPO" && <TpoTab sym={sym} price={price} />}
+          {tab === "ABSORB" && <AbsorbTab sym={sym} />}
           {tab === "SCAN" && <Screener list={list} onPick={pick} />}
           {tab === "NEWS" && <News news={news} err={newsErr} sym={sym} />}
           {tab === "CONTEXT" && <ContextTab a={a} sym={sym} />}

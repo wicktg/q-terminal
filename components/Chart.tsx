@@ -22,6 +22,7 @@ import { colsFromBars } from "@/lib/mtf.ts";
 import { poolsAt, walk, zonesAt } from "@/lib/structure.ts";
 import { fmtPx, fmtUsd, hlBar, hlName, pxDigits, type HlCandle } from "@/lib/format.ts";
 import { FlowLayer } from "./flow-layer.ts";
+import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
 
 const TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
 const TF_SEC: Record<(typeof TFS)[number], number> = { "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
@@ -286,9 +287,9 @@ class PaneLabel implements ISeriesPrimitive<Time> {
   }
 }
 
-type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; marks?: { price: number; label: string }[] };
+type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void };
 
-export default function Chart({ sym, analysis, onPrice, marks }: Props) {
+export default function Chart({ sym, analysis, onPrice }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const legend = useRef<HTMLDivElement>(null);
   const flowCanvas = useRef<HTMLCanvasElement>(null);
@@ -297,7 +298,7 @@ export default function Chart({ sym, analysis, onPrice, marks }: Props) {
   const minRef = useRef(minUsd);
   minRef.current = minUsd;
   const [tf, setTf] = useState<(typeof TFS)[number]>("1h");
-  const [on, setOn] = useState({ struct: true, zones: true, fvg: true, ema: false, ribbon: false, vp: false, liq: false });
+  const [on, setOn] = useState({ struct: true, zones: true, fvg: true, ema: false, ribbon: false, vp: false, tpo: false, liq: false });
   const [feed, setFeed] = useState<"LIVE" | "POLL" | "NOT ON HL" | "...">("...");
   const api = useRef<{
     chart: IChartApi;
@@ -717,15 +718,41 @@ export default function Chart({ sym, analysis, onPrice, marks }: Props) {
       });
   }, [analysis, on.liq, sym]);
 
-  // Extra labelled levels supplied by the page, such as the LAB's ranges.
+  // TPO levels as price lines: the live session's POC and value area, and untested POCs nearby.
   useEffect(() => {
-    const a = api.current;
-    if (!a || !marks?.length) return;
-    const lines = marks.map((m) => a.candle.createPriceLine({ price: m.price, color: "#f5a623", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: m.label }));
-    return () => {
-      if (api.current) lines.forEach((l) => api.current!.candle.removePriceLine(l));
+    if (!on.tpo) return;
+    let dead = false;
+    let lines: IPriceLine[] = [];
+    const clear = () => {
+      const a = api.current;
+      if (a) lines.forEach((l) => a.candle.removePriceLine(l));
+      lines = [];
     };
-  }, [marks]);
+    const load = async () => {
+      try {
+        const r = (await (await fetch(`/api/tpo?sym=${sym}&days=10`)).json()) as { bars?: TpoBar[] };
+        const a = api.current;
+        const px = bars.current[bars.current.length - 1]?.c;
+        const lv = r.bars?.length && px ? tpoLevels(r.bars, px) : null;
+        if (dead || !a || !lv) return;
+        clear();
+        const add = (price: number, color: string, style: LineStyle, title: string) => lines.push(a.candle.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title }));
+        add(lv.poc, "#f5a623", LineStyle.Solid, "POC");
+        add(lv.vah, "#5b9cf6", LineStyle.Dashed, "VAH");
+        add(lv.val, "#5b9cf6", LineStyle.Dashed, "VAL");
+        lv.naked.forEach((n) => add(n.poc, "rgba(245,166,35,0.7)", LineStyle.Dotted, "nPOC"));
+      } catch {
+        /* the next refresh retries */
+      }
+    };
+    void load();
+    const id = setInterval(load, 60000);
+    return () => {
+      dead = true;
+      clearInterval(id);
+      clear();
+    };
+  }, [on.tpo, sym]);
 
   const toggles: [keyof typeof on, string][] = [
     ["struct", "STRUCTURE"],
@@ -734,6 +761,7 @@ export default function Chart({ sym, analysis, onPrice, marks }: Props) {
     ["ema", "EMA"],
     ["ribbon", "AVWAP"],
     ["vp", "VP"],
+    ["tpo", "TPO"],
     ["liq", "LIQ"],
   ];
   return (
