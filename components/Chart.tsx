@@ -28,6 +28,8 @@ const TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
 const TF_SEC: Record<(typeof TFS)[number], number> = { "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
 const WS_BASE = "wss://fstream.binance.com/market/ws"; // the old /ws path still connects but sends nothing
 const PULSE_MS = 5000;
+const TICK_PAINT_MS = 120;
+const FULL_PAINT_MS = 400;
 const POLL_AFTER_MS = 12e3; // no ticks for this long means the feed is the poll, not the socket
 const RECONNECT_AFTER_MS = 30e3;
 const VIEW_BARS = 160;
@@ -287,9 +289,9 @@ class PaneLabel implements ISeriesPrimitive<Time> {
   }
 }
 
-type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void };
+type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; digits?: number };
 
-export default function Chart({ sym, analysis, onPrice }: Props) {
+export default function Chart({ sym, analysis, onPrice, digits }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const legend = useRef<HTMLDivElement>(null);
   const flowCanvas = useRef<HTMLCanvasElement>(null);
@@ -488,11 +490,15 @@ export default function Chart({ sym, analysis, onPrice }: Props) {
     const schedule = (full: boolean) => {
       pendingFull ||= full;
       if (timer) return;
-      timer = setTimeout(() => {
-        timer = null;
-        paint(pendingFull);
-        pendingFull = false;
-      }, 400);
+      // Live ticks repaint fast so the candle and the page price move together. A closed bar redraws zones, so it waits.
+      timer = setTimeout(
+        () => {
+          timer = null;
+          paint(pendingFull);
+          pendingFull = false;
+        },
+        pendingFull ? FULL_PAINT_MS : TICK_PAINT_MS,
+      );
     };
     const ingest = (b: Bar) => {
       if (dead) return; // a tick from the previous coin can still arrive after its socket closes
@@ -652,8 +658,8 @@ export default function Chart({ sym, analysis, onPrice }: Props) {
         spot.current = new Map((t ?? r).spot?.map((x) => [x.t, x.d]) ?? []);
         paint(true);
         const a = api.current;
-        const digits = pxDigits(r.bars[r.bars.length - 1].c);
-        a?.candle.applyOptions({ priceFormat: { type: "price", precision: digits, minMove: 10 ** -digits } });
+        const dp = pxDigits(r.bars[r.bars.length - 1].c, sym);
+        a?.candle.applyOptions({ priceFormat: { type: "price", precision: dp, minMove: 10 ** -dp } });
         // Dragging a price axis switches auto-scale off, which would strand the new coin off screen.
         if (a) for (const s of [a.candle, a.vol, a.cvdP, a.cvdS]) s.priceScale().applyOptions({ autoScale: true });
         if (a) {
@@ -687,6 +693,11 @@ export default function Chart({ sym, analysis, onPrice }: Props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sym, tf, flow]);
+
+  // Axis decimals follow the coin's tick size once the watchlist has loaded it.
+  useEffect(() => {
+    if (digits !== undefined) api.current?.candle.applyOptions({ priceFormat: { type: "price", precision: digits, minMove: 10 ** -digits } });
+  }, [digits, sym]);
 
   // overlay toggles
   useEffect(() => {

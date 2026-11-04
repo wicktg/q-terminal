@@ -5,7 +5,7 @@ import AbsorbTab from "./AbsorbTab.tsx";
 import TpoTab from "./TpoTab.tsx";
 import { useJson } from "./use-json.ts";
 import type { Analysis, Book, Forecast, Frame, NewsItem, NewsResp, ScreenerRow, UniverseCoin } from "@/lib/types.ts";
-import { fmtPct, fmtPx, fmtUsd, toneClass } from "@/lib/format.ts";
+import { fmtPct, fmtPx, fmtUsd, pxDigits, setActiveSym, setPriceDigits, toneClass } from "@/lib/format.ts";
 
 const Chart = dynamic(() => import("./Chart"), { ssr: false });
 
@@ -14,6 +14,9 @@ const DEFAULT_LIST = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "NEAR", "ENA", "LIT", 
 const LIST_CHANGES = ["+1000PEPE", "+AERO", "+VVV", "+UNI", "-AVAX", "-XRP", "-BNB", "+ZRO"];
 const TABS = ["CHART", "ZONES", "TPO", "ABSORB", "SCAN", "NEWS", "CONTEXT"] as const;
 type Tab = (typeof TABS)[number];
+const TICKER_WS = "wss://fstream.binance.com/market/ws/!miniTicker@arr"; // every perp, about once a second
+const TICKER_STALE_MS = 15e3;
+type Tick = { c: number; o: number };
 
 const Loading = ({ err }: { err?: boolean }) => <div className="note">{err ? "Feed unavailable. Retrying." : "Loading…"}</div>;
 
@@ -33,9 +36,9 @@ function FrameRow({ f }: { f: Frame }) {
   );
 }
 
-function StructurePanel({ a }: { a: Analysis | null }) {
+function StructurePanel({ a, price }: { a: Analysis | null; price: number }) {
   if (!a) return <Loading />;
-  const px = a.price;
+  const px = price || a.price;
   const above = a.ta.zones.filter((z) => z.dist > 0).slice(0, 3).reverse();
   const below = a.ta.zones.filter((z) => z.dist < 0).slice(0, 3);
   const inside = a.ta.zones.filter((z) => z.dist === 0).slice(0, 2);
@@ -308,7 +311,7 @@ function Screener({ list, onPick }: { list: string[]; onPick: (s: string) => voi
           {data.map((r) => (
             <tr key={r.sym} className="click" onClick={() => onPick(r.sym)}>
               <td style={{ color: "#fff" }}>{r.sym}</td>
-              <td className="r">{fmtPx(r.price)}</td>
+              <td className="r">{fmtPx(r.price, r.sym)}</td>
               <td className={`r ${toneClass(r.chg24h)}`}>{fmtPct(r.chg24h)}</td>
               {r.frames.map((f) => <td key={f.tf} className={`r ${trendTone(f.trend)}`}>{arrow(f.trend)}</td>)}
               <td className="dim">{r.event}</td>
@@ -408,6 +411,8 @@ export default function Terminal() {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [live, setLive] = useState<number | null>(null);
+  const [tick, setTick] = useState<Record<string, Tick>>({});
+  const tickAt = useRef(0);
   const search = useRef<HTMLInputElement>(null);
   const { data: uni } = useJson<UniverseCoin[]>("/api/universe", 15000);
   const { data: analysis, err } = useJson<Analysis>(`/api/coin?sym=${sym}`, 60000);
@@ -468,10 +473,53 @@ export default function Terminal() {
     return () => window.removeEventListener("keydown", key);
   }, []);
 
+  // Live prices for every coin from Binance's ticker stream, batched to one update a second.
+  useEffect(() => {
+    let dead = false;
+    let ws: WebSocket | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let buf: Record<string, Tick> = {};
+    const connect = () => {
+      if (dead) return;
+      const s = new WebSocket(TICKER_WS);
+      ws = s;
+      s.onmessage = (e) => {
+        for (const t of JSON.parse(e.data) as { s: string; c: string; o: string }[]) if (t.s.endsWith("USDT")) buf[t.s.slice(0, -4)] = { c: +t.c, o: +t.o };
+      };
+      s.onerror = () => s.close();
+      s.onclose = () => {
+        if (!dead) retry = setTimeout(connect, 3000);
+      };
+    };
+    connect();
+    const flush = setInterval(() => {
+      if (!Object.keys(buf).length) return;
+      const b = buf;
+      buf = {};
+      tickAt.current = Date.now();
+      setTick((p) => ({ ...p, ...b }));
+    }, 1000);
+    return () => {
+      dead = true;
+      ws?.close();
+      clearInterval(flush);
+      if (retry) clearTimeout(retry);
+    };
+  }, []);
+
+  useMemo(() => uni && setPriceDigits(uni), [uni]);
+  setActiveSym(sym); // prices on this page format to the selected coin's tick unless told otherwise
+
   const byS = useMemo(() => new Map(uni?.map((u) => [u.sym, u]) ?? []), [uni]);
   const results = q ? (uni ?? []).filter((u) => u.sym.includes(q.toUpperCase())).slice(0, 40) : null;
   const u = byS.get(sym);
-  const price = live ?? u?.price ?? analysis?.price ?? 0;
+  // One price for the whole page. On the chart tab it is the live candle's close, so the two always match.
+  // Elsewhere, and for every other coin, it is the ticker stream, falling back to the 15 second snapshot.
+  const ticks = Date.now() - tickAt.current < TICKER_STALE_MS ? tick : {};
+  const priceOf = (s: string, fallback: number) => (s === sym && tab === "CHART" && live ? live : (ticks[s]?.c ?? fallback));
+  const chgOf = (s: string, p: number, fallback: number) => (ticks[s] ? (p / ticks[s].o - 1) * 100 : fallback);
+  const price = priceOf(sym, u?.price ?? analysis?.price ?? 0);
+  const chg = chgOf(sym, price, u?.chg24h ?? 0);
   const a = analysis?.sym === sym ? analysis : null;
 
   return (
@@ -480,7 +528,7 @@ export default function Terminal() {
         <span className="brand hide-m">Q</span>
         <button className="sym" onClick={() => setOpen((o) => !o)}>{sym}</button>
         <span className="price">{price ? fmtPx(price) : "—"}</span>
-        <span className={toneClass(u?.chg24h)}>{fmtPct(u?.chg24h)}</span>
+        <span className={toneClass(chg)}>{fmtPct(chg)}</span>
         {a?.ta.frames.map((f) => <span key={f.tf} className="kv"><span className="hide-m">{f.tf} </span><b className={trendTone(f.trend)}>{arrow(f.trend)}</b></span>)}
         <span className="status">{err ? "DATA ERROR" : a ? new Date(a.asOf).toLocaleTimeString("en-GB") : "LOADING"}</span>
       </header>
@@ -502,24 +550,28 @@ export default function Terminal() {
         <aside className={`side ${open ? "open" : ""}`}>
           <input ref={search} className="search" placeholder="Search / to focus" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search coins" />
           <div className="wl">
-            {(results ?? list.map((s) => byS.get(s) ?? { sym: s, price: 0, chg24h: 0, vol24hUsd: 0, funding: 0 })).map((c) => (
+            {(results ?? list.map((s) => byS.get(s) ?? { sym: s, price: 0, chg24h: 0, vol24hUsd: 0, funding: 0 })).map((c) => {
+              const p = priceOf(c.sym, c.price);
+              const ch = chgOf(c.sym, p, c.chg24h);
+              return (
               <div key={c.sym} className="wl-row" data-on={c.sym === sym} role="button" tabIndex={0} onClick={() => pick(c.sym)} onKeyDown={(e) => e.key === "Enter" && pick(c.sym)}>
                 <span className="n">{c.sym}</span>
-                <span>{c.price ? fmtPx(c.price) : "—"}</span>
-                <span className={toneClass(c.chg24h)} style={{ minWidth: 52, textAlign: "right" }}>{fmtPct(c.chg24h, 1)}</span>
+                <span>{p ? fmtPx(p, c.sym) : "—"}</span>
+                <span className={toneClass(ch)} style={{ minWidth: 52, textAlign: "right" }}>{fmtPct(ch, 1)}</span>
                 {results && !list.includes(c.sym) && (
                   <button className="wl-x" style={{ gridColumn: 3 }} onClick={(e) => { e.stopPropagation(); saveList([...list, c.sym]); }}>+ add</button>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         </aside>
 
         <main className={`main ${tab === "CHART" || tab === "TPO" ? "fill" : ""}`}>
           {tab === "CHART" && (
             <>
-              <Chart sym={sym} analysis={a} onPrice={setLive} />
-              <div className="ctx-inline"><StructurePanel a={a} /></div>
+              <Chart sym={sym} analysis={a} onPrice={setLive} digits={pxDigits(price || 1, sym)} />
+              <div className="ctx-inline"><StructurePanel a={a} price={price} /></div>
             </>
           )}
           {tab === "ZONES" && <Zones sym={sym} a={a} />}
@@ -530,7 +582,7 @@ export default function Terminal() {
           {tab === "CONTEXT" && <ContextTab a={a} sym={sym} />}
         </main>
 
-        <section className="ctx"><StructurePanel a={a} /></section>
+        <section className="ctx"><StructurePanel a={a} price={price} /></section>
       </div>
 
       <nav className="mob-nav">

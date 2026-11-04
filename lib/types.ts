@@ -192,6 +192,7 @@ export type UniverseCoin = {
   chg24h: number;
   vol24hUsd: number;
   funding: number;
+  dp?: number; // price decimals from the exchange tick size
 };
 
 export type ScreenerRow = {

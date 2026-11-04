@@ -148,43 +148,124 @@ function draw(cv: HTMLCanvasElement, W: number, shown: Session[], focus: Session
   return { colW, rowY: yPx(px) };
 }
 
-function Stats({ s, prev, comp, naked, px, venue }: { s: Session; prev?: Session; comp: ReturnType<typeof composite>; naked: Naked[]; px: number; venue: string }) {
+type Level = { label: string; price: number; tone: "poc" | "va" | "comp" | "naked" | "prev" };
+
+// Plain-English reading of a session, written for someone glancing at it mid-trade.
+function readOf(s: Session, prev: Session | undefined, comp: ReturnType<typeof composite>, naked: Naked[], px: number) {
+  const out: string[] = [];
   const ref = s.live ? px : s.close;
-  const where = ref > s.vah ? "above value" : ref < s.val ? "below value" : "inside value";
-  const ov = openVsValue(s, prev);
-  const ext = { up: "Up only", down: "Down only", both: "Both ways", none: "None yet" }[s.ext];
+  const value = `${fmtPx(s.val)}–${fmtPx(s.vah)}`;
+  const where = ref > s.vah ? `above value (${value})` : ref < s.val ? `below value (${value})` : `inside value (${value})`;
+  out.push(s.live ? `Price ${fmtPx(px)} is ${where}, ${pct(px, s.poc)} from the POC at ${fmtPx(s.poc)}.` : `It closed ${where} at ${fmtPx(s.close)}.`);
+  if (prev) {
+    const before = s.live ? "yesterday's" : "the day before's";
+    const mid = (s.vah + s.val) / 2;
+    const pm = (prev.vah + prev.val) / 2;
+    out.push(
+      s.val > prev.vah
+        ? `Value moved fully above ${before}. Buyers are in control.`
+        : s.vah < prev.val
+          ? `Value moved fully below ${before}. Sellers are in control.`
+          : mid > pm * 1.002
+            ? `Value overlaps ${before} but is building higher.`
+            : mid < pm * 0.998
+              ? `Value overlaps ${before} but is building lower.`
+              : `Value sits where it was ${s.live ? "yesterday" : "the day before"}. The market is balanced.`,
+    );
+  }
+  const ext = {
+    up: "Price broke above the first hour's range, so buyers started the move.",
+    down: "Price broke below the first hour's range, so sellers started the move.",
+    both: "Price broke the first hour's range both ways, so neither side is in control.",
+    none: "Price is still inside the first hour's range.",
+  };
+  out.push(ext[s.ext]);
   const range = (r: { lo: number; hi: number }) => `${fmtPx(r.lo)}–${fmtPx(r.hi)}`;
-  const near = [...naked].sort((a, b) => Math.abs(a.poc - px) - Math.abs(b.poc - px)).slice(0, 4);
-  const rows: [string, React.ReactNode][] = [
-    ["POC", <span key="p" className="amber">{fmtPx(s.poc)}</span>],
-    ["Value area", <span key="v" style={{ color: "var(--blue)" }}>{fmtPx(s.val)} – {fmtPx(s.vah)}</span>],
-    [s.live ? "Price" : "Close", <span key="w" className={ref > s.vah ? "up" : ref < s.val ? "down" : ""}>{fmtPx(ref)} · {where}</span>],
-    ["Opened", ov ? `${ov} prior value` : "—"],
-    ["Initial balance", s.ib ? `${range(s.ib)} (${((s.ib.hi / s.ib.lo - 1) * 100).toFixed(1)}%)` : "—"],
-    ["Range extension", ext],
+  if (s.tailLow) out.push(`Buyers rejected ${range(s.tailLow)} sharply, so that low is defended.`);
+  if (s.tailHigh) out.push(`Sellers rejected ${range(s.tailHigh)} sharply, so that high is defended.`);
+  if (s.poorHigh) out.push("The high is flat, an unfinished auction that often gets retested.");
+  if (s.poorLow) out.push("The low is flat, an unfinished auction that often gets retested.");
+  if (s.live) {
+    const others = [prev?.vah, prev?.poc, prev?.val, comp?.vah, comp?.poc, comp?.val, ...naked.map((n) => n.poc)].filter((x): x is number => !!x);
+    const up = others.filter((x) => x > s.vah * 1.001).sort((x, y) => x - y)[0];
+    const dn = others.filter((x) => x < s.val * 0.999).sort((x, y) => y - x)[0];
+    if (ref > s.vah) out.push(`If price holds above ${fmtPx(s.vah)} for an hour, value is moving up${up ? `, next ${fmtPx(up)}` : ""}. Back inside value points to the POC at ${fmtPx(s.poc)}.`);
+    else if (ref < s.val) out.push(`If price holds below ${fmtPx(s.val)} for an hour, value is moving down${dn ? `, next ${fmtPx(dn)}` : ""}. Back inside value points to the POC at ${fmtPx(s.poc)}.`);
+    else out.push(`Watch the edges. An hour above ${fmtPx(s.vah)} means price is accepted higher${up ? `, next ${fmtPx(up)}` : ""}. An hour below ${fmtPx(s.val)} means lower${dn ? `, next ${fmtPx(dn)}` : ""}.`);
+  }
+  return out;
+}
+
+function Stats({ s, prev, comp, naked, px, venue }: { s: Session; prev?: Session; comp: ReturnType<typeof composite>; naked: Naked[]; px: number; venue: string }) {
+  const tag = s.live ? "Today" : day(s.start).slice(0, 3);
+  const levels: Level[] = [
+    { label: `${tag} value high`, price: s.vah, tone: "va" as const },
+    { label: `${tag} POC`, price: s.poc, tone: "poc" as const },
+    { label: `${tag} value low`, price: s.val, tone: "va" as const },
+    ...(prev ? [{ label: "Prior day POC", price: prev.poc, tone: "prev" as const }] : []),
+    ...(comp
+      ? [
+          { label: "5-day value high", price: comp.vah, tone: "comp" as const },
+          { label: "5-day POC", price: comp.poc, tone: "comp" as const },
+          { label: "5-day value low", price: comp.val, tone: "comp" as const },
+        ]
+      : []),
+    ...naked.filter((n) => Math.abs(n.poc / px - 1) <= 0.12).map((n) => ({ label: `Untested POC ${day(n.start).slice(4)}`, price: n.poc, tone: "naked" as const })),
+  ].sort((x, y) => y.price - x.price);
+  const at = levels.findIndex((l) => l.price < px);
+  const ladder: (Level | null)[] = [...levels];
+  ladder.splice(at < 0 ? levels.length : at, 0, null); // null marks where price sits
+  const range = (r: { lo: number; hi: number }) => `${fmtPx(r.lo)}–${fmtPx(r.hi)}`;
+  const ov = openVsValue(s, prev);
+  const details: [string, string][] = [
+    ["Shape", `${s.shape}: ${SHAPE_NOTE[s.shape]}`],
+    ["Opened", ov ? `${ov} the prior day's value` : "—"],
+    ["First hour range", s.ib ? `${range(s.ib)} (${((s.ib.hi / s.ib.lo - 1) * 100).toFixed(1)}%)` : "—"],
     ["Single prints", s.singles.length ? s.singles.map(range).join(", ") : "None"],
     ["Tails", [s.tailHigh && `selling ${range(s.tailHigh)}`, s.tailLow && `buying ${range(s.tailLow)}`].filter(Boolean).join(", ") || "None"],
-    ["Poor high / low", [s.poorHigh && "poor high", s.poorLow && "poor low"].filter(Boolean).join(", ") || "None"],
+    ["Flat high or low", [s.poorHigh && "high", s.poorLow && "low"].filter(Boolean).join(", ") || "None"],
   ];
   return (
     <>
-      <div className="h">SESSION<span>{day(s.start)}{s.live ? ` · ${s.periods} of 48 periods` : ""}</span></div>
-      <table className="stat"><tbody>{rows.map(([k, v]) => <tr key={k}><td>{k}</td><td>{v}</td></tr>)}</tbody></table>
-      <div className="h">SHAPE<span>{s.shape}</span></div>
-      <div className="note">{SHAPE_NOTE[s.shape]}{s.live ? " The session is still building, so the shape can change." : ""}</div>
-      <div className="h">5-DAY VALUE</div>
-      <table className="stat"><tbody>
-        <tr><td>Composite POC</td><td className="amber">{comp ? fmtPx(comp.poc) : "—"}</td></tr>
-        <tr><td>Composite value</td><td>{comp ? `${fmtPx(comp.val)} – ${fmtPx(comp.vah)}` : "—"}</td></tr>
-      </tbody></table>
-      <div className="h">UNTESTED POCS<span>price tends to revisit</span></div>
-      <table className="stat"><tbody>
-        {near.length ? near.map((n) => <tr key={n.start}><td>{day(n.start)}</td><td><span className="amber">{fmtPx(n.poc)}</span> <span className="dim">{pct(n.poc, px)}</span></td></tr>) : <tr><td>None</td><td /></tr>}
-      </tbody></table>
-      <div className="note">Each letter is a 30-minute period of the UTC day, A at 00:00. Amber A and B are the initial balance, the blue band is the value area, which holds 70% of the time, and the amber row is the POC. Blue letters are single prints, and red or green letters are tails. Dashed amber lines are POCs price has not revisited. Tap a day to read it. Data: {venue} perps.</div>
+      <div className="h">WHAT IT SAYS<span>{day(s.start)}{s.live ? ` · live, ${s.periods} of 48 periods` : ""}</span></div>
+      <ul className="tpo-read">{readOf(s, prev, comp, naked, px).map((l) => <li key={l}>{l}</li>)}</ul>
+      <div className="h">KEY LEVELS<span>highest first, with distance from price</span></div>
+      <div className="lv">
+        {ladder.map((l) =>
+          l ? (
+            <div key={`${l.label}${l.price}`} className="lv-row" data-tone={l.tone}>
+              <span>{l.label}</span>
+              <span className="r">{fmtPx(l.price)}</span>
+              <span className="r dim">{pct(l.price, px)}</span>
+            </div>
+          ) : (
+            <div key="now" className="lv-row lv-now">
+              <span>Price now</span>
+              <span className="r">{fmtPx(px)}</span>
+              <span />
+            </div>
+          ),
+        )}
+      </div>
+      <div className="h">DETAILS</div>
+      <table className="stat tpo-details"><tbody>{details.map(([k, v]) => <tr key={k}><td>{k}</td><td>{v}</td></tr>)}</tbody></table>
+      <div className="note">Each block or letter is 30 minutes of the UTC day, A at 00:00. Long rows are prices the market accepted, and short rows were rejected. Tap a day to read it. Data: {venue} perps.</div>
     </>
   );
 }
+
+const Legend = () => (
+  <div className="tpo-legend">
+    <span><i className="amber">■</i>POC, most time</span>
+    <span><i style={{ color: "var(--blue)" }}>■</i>value area, 70% of time</span>
+    <span><i className="amber">▌</i>first hour</span>
+    <span><i>▸</i>open</span>
+    <span><i style={{ color: "#fff" }}>■</i>now</span>
+    <span><i style={{ color: "var(--blue)" }}>A</i>single prints</span>
+    <span><i className="up">■</i><i className="down">■</i>tails</span>
+    <span><i className="amber">┊</i>untested POC</span>
+  </div>
+);
 
 export default function TpoTab({ sym, price }: { sym: string; price: number }) {
   const { data, err } = useJson<Resp>(`/api/tpo?sym=${sym}&days=12`, 60000);
@@ -245,8 +326,9 @@ export default function TpoTab({ sym, price }: { sym: string; price: number }) {
           <span className="dim">{shown.length > 1 ? `${day(shown[0].start)} – ${day(shown[shown.length - 1].start)}` : day(focus.start)}</span>
           <button disabled={b === 0} onClick={() => setBack(b - 1)} aria-label="Newer session">▶</button>
           {b > 0 && <button onClick={() => setBack(0)}>LATEST</button>}
-          <span className="keys faint">ROW {+focus.step.toPrecision(3)} · <i className="amber">■</i> POC <i style={{ color: "var(--blue)" }}>■</i> VALUE <i className="amber">┊</i> UNTESTED POC</span>
+          <span className="faint tpo-row">ROW {+focus.step.toPrecision(3)}</span>
         </div>
+        <Legend />
         <div className="tpo-scroll" ref={scroller}>
           <canvas
             ref={cv}

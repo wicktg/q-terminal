@@ -17,14 +17,26 @@ export const hlBar = (k: HlCandle): Bar => ({
   tb: +k.v / 2,
 });
 
-export function pxDigits(x: number) {
-  const a = Math.abs(x);
-  return a >= 1000 ? 1 : a >= 100 ? 2 : a >= 1 ? 3 : a >= 0.01 ? 4 : 6;
+// Price decimals follow each coin's tick size on the exchange, so 1000PEPE shows 7 and BTC shows 1.
+// Coins without a known tick fall back to a rule on magnitude. The page sets the coin it is showing,
+// and anything formatting another coin's price passes that coin's symbol.
+const tickDigits = new Map<string, number>();
+let activeSym = "";
+export function setPriceDigits(rows: { sym: string; dp?: number }[]) {
+  for (const r of rows) if (r.dp !== undefined) tickDigits.set(r.sym, r.dp);
+}
+export function setActiveSym(sym: string) {
+  activeSym = sym;
+}
+const byMagnitude = (a: number) => (a >= 10000 ? 1 : a >= 100 ? 2 : a >= 1 ? 3 : a >= 0.1 ? 4 : a >= 0.01 ? 5 : 7);
+
+export function pxDigits(x: number, sym = activeSym) {
+  return tickDigits.get(sym) ?? byMagnitude(Math.abs(x));
 }
 
-export function fmtPx(x: number) {
+export function fmtPx(x: number, sym?: string) {
   if (!Number.isFinite(x)) return "—";
-  const d = pxDigits(x);
+  const d = pxDigits(x, sym);
   return x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 

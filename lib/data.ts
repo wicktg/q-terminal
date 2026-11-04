@@ -142,13 +142,20 @@ export const universe = () =>
       json<{ symbol: string; lastPrice: string; priceChangePercent: string; quoteVolume: string }[]>(`${FAPI}/fapi/v1/ticker/24hr`),
       json<{ symbol: string; lastFundingRate: string }[]>(`${FAPI}/fapi/v1/premiumIndex`),
       cached("info", 3600e3, () =>
-        json<{ symbols: { symbol: string; contractType: string; status: string; quoteAsset: string; baseAsset: string }[] }>(
+        json<{ symbols: { symbol: string; contractType: string; status: string; quoteAsset: string; baseAsset: string; filters?: { filterType: string; tickSize?: string }[] }[] }>(
           `${FAPI}/fapi/v1/exchangeInfo`,
         ),
       ),
       fundingHours(),
     ]);
     const fund = new Map(prem.map((p) => [p.symbol, +p.lastFundingRate]));
+    // Decimals in the tick size, so "0.0010" is 3 and "0.10" is 1.
+    const dp = new Map(
+      info.symbols.map((s) => {
+        const tick = s.filters?.find((f) => f.filterType === "PRICE_FILTER")?.tickSize;
+        return [s.symbol, tick ? (tick.replace(/0+$/, "").split(".")[1] ?? "").length : undefined] as const;
+      }),
+    );
     const live = new Set(
       info.symbols
         .filter((s) => s.contractType === "PERPETUAL" && s.status === "TRADING" && s.quoteAsset === "USDT")
@@ -162,6 +169,7 @@ export const universe = () =>
         chg24h: +t.priceChangePercent,
         vol24hUsd: +t.quoteVolume,
         funding: ((fund.get(t.symbol) ?? 0) * 24 * 365 * 100) / (hours.get(t.symbol) ?? 8),
+        dp: dp.get(t.symbol),
       }))
       .sort((a, b) => b.vol24hUsd - a.vol24hUsd);
   });
