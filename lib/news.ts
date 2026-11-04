@@ -115,6 +115,7 @@ const COINS: [RegExp, string][] = [
   [/\b(aerodrome|\$aero)\b/i, "AERO"],
   [/\bvenice (ai|token)\b|\$vvv\b/i, "VVV"],
   [/\b(uniswap|\$uni)\b/i, "UNI"],
+  [/\b(layerzero|layer zero|zro)\b/i, "ZRO"],
 ];
 
 // Crude headline polarity. Negation is checked first because "no ceasefire" reads bullish otherwise.

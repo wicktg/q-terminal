@@ -9,9 +9,9 @@ import { fmtPct, fmtPx, fmtUsd, toneClass } from "@/lib/format.ts";
 
 const Chart = dynamic(() => import("./Chart"), { ssr: false });
 
-const DEFAULT_LIST = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "NEAR", "ENA", "LIT", "DOGE", "SUI", "LINK", "1000PEPE", "AERO", "VVV", "UNI"];
+const DEFAULT_LIST = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "NEAR", "ENA", "LIT", "DOGE", "SUI", "LINK", "1000PEPE", "AERO", "VVV", "UNI", "ZRO"];
 // Applied once to watchlists saved earlier, so a later manual add or remove sticks.
-const LIST_CHANGES = ["+1000PEPE", "+AERO", "+VVV", "+UNI", "-AVAX", "-XRP", "-BNB"];
+const LIST_CHANGES = ["+1000PEPE", "+AERO", "+VVV", "+UNI", "-AVAX", "-XRP", "-BNB", "+ZRO"];
 const TABS = ["CHART", "ZONES", "TPO", "ABSORB", "SCAN", "NEWS", "CONTEXT"] as const;
 type Tab = (typeof TABS)[number];
 
