@@ -130,7 +130,90 @@ class Overlay implements ISeriesPrimitive<Time> {
   }
   updateAllViews() {}
   paneViews() {
-    return [{ zOrder: () => "bottom" as const, renderer: () => ({ draw: (t: never) => this.draw(t) }) }];
+    return [
+      { zOrder: () => "bottom" as const, renderer: () => ({ draw: (t: never) => this.draw(t) }) },
+      { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawWickMarks(t) }) },
+    ];
+  }
+  // Wick dots, sweep levels and labels sit above the candles so nothing covers them.
+  private drawWickMarks(target: { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void }) {
+    const p = this.p;
+    if (!p || !this.d.showWicks || !this.d.wicks.length) return;
+    const { chart, series } = p;
+    const ts_ = chart.timeScale();
+    const y = (v: number) => series.priceToCoordinate(v);
+    const x = (t: number) => {
+      const first = this.d.times.find((v) => v >= t);
+      return first === undefined ? null : (ts_.timeToCoordinate(ts(first)) as number | null);
+    };
+    target.useBitmapCoordinateSpace(({ context: c, horizontalPixelRatio: hr, verticalPixelRatio: vr, bitmapSize }) => {
+      const tags: { text: string; rgb: string; X: number; Y: number; up: boolean }[] = [];
+      for (const k of this.d.wicks) {
+        const xc = x(k.t);
+        const yt = y(k.tip);
+        if (xc === null || yt === null) continue;
+        const up = k.side === "upper";
+        const rgb = up ? "229,83,75" : "43,191,133";
+        const X = xc * hr;
+        // A sweep draws the level it took, faint, from where the level formed up to the wick.
+        if (k.sweep) {
+          const yl = y(k.sweep.level);
+          const x0 = x(k.sweep.from);
+          if (yl !== null) {
+            c.strokeStyle = "rgba(245,166,35,0.55)";
+            c.lineWidth = hr;
+            c.setLineDash([4 * hr, 4 * hr]);
+            c.beginPath();
+            c.moveTo((x0 ?? xc - 40) * hr, yl * vr);
+            c.lineTo(X, yl * vr);
+            c.stroke();
+            c.setLineDash([]);
+          }
+        }
+        // A dot just past the tip: solid when the flow shows who drove the wick, hollow when thin or two-way.
+        const dotY = (yt + (up ? -6 : 6)) * vr;
+        const r = (k.strong ? 3.5 : 2.5) * hr;
+        c.beginPath();
+        c.arc(X, dotY, r, 0, Math.PI * 2);
+        c.fillStyle = "#000";
+        c.fill();
+        if (k.kind === "trapped" || k.kind === "rejected") {
+          c.fillStyle = `rgb(${rgb})`;
+          c.fill();
+        } else {
+          c.strokeStyle = `rgb(${rgb})`;
+          c.lineWidth = 1.5 * hr;
+          c.stroke();
+        }
+        if (k.strong && k.tag) tags.push({ text: k.tag, rgb, X, Y: dotY + (up ? -r - 6 * vr : r + 6 * vr), up });
+      }
+      // Labels: solid chips past the dot, stepped away from each other so none overlap.
+      c.font = `600 ${11 * vr}px monospace`;
+      const H = 16 * vr;
+      const placed: { x: number; y: number; w: number }[] = [];
+      for (const t of tags) {
+        const w = c.measureText(t.text).width + 12 * hr;
+        let lx = Math.min(Math.max(2 * hr, t.X - w / 2), bitmapSize.width - w - 2 * hr);
+        let ly = t.up ? t.Y - H : t.Y;
+        for (let n = 0; n < 8 && placed.some((q) => lx < q.x + q.w && lx + w > q.x && Math.abs(q.y - ly) < H + 2 * vr); n++) ly += t.up ? -(H + 2 * vr) : H + 2 * vr;
+        placed.push({ x: lx, y: ly, w });
+        // A short leader from the chip to the dot.
+        c.strokeStyle = `rgba(${t.rgb},0.7)`;
+        c.lineWidth = hr;
+        c.beginPath();
+        c.moveTo(t.X, t.up ? ly + H : ly);
+        c.lineTo(t.X, t.Y);
+        c.stroke();
+        c.fillStyle = "rgba(0,0,0,0.92)";
+        c.fillRect(lx, ly, w, H);
+        c.strokeStyle = `rgba(${t.rgb},0.9)`;
+        c.strokeRect(lx + 0.5 * hr, ly + 0.5 * vr, w - hr, H - vr);
+        c.fillStyle = `rgb(${t.rgb})`;
+        c.textBaseline = "middle";
+        c.fillText(t.text, lx + 6 * hr, ly + H / 2 + 0.5 * vr);
+        c.textBaseline = "alphabetic";
+      }
+    });
   }
   private draw(target: { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void }) {
     const p = this.p;
@@ -217,45 +300,14 @@ class Overlay implements ISeriesPrimitive<Time> {
         }
       }
       if (this.d.showWicks) {
+        // The wick itself, thickened in its colour behind the candle. Markers and labels draw above candles.
         for (const k of this.d.wicks) {
           const xc = x(k.t);
           const yt = y(k.tip);
           const yb = y(k.base);
           if (xc === null || yt === null || yb === null) continue;
-          const up = k.side === "upper";
-          const rgb = up ? "229,83,75" : "43,191,133";
-          const X = xc * hr;
-          // The wick itself, thickened in its colour behind the candle so it stands out.
-          c.fillStyle = `rgba(${rgb},${k.strong ? 0.9 : 0.55})`;
-          c.fillRect(X - 1.5 * hr, Math.min(yt, yb) * vr, 3 * hr, Math.max(1, Math.abs(yb - yt) * vr));
-          // A dot past the tip: solid when the flow shows who drove the wick, hollow when thin or two-way.
-          const my = (yt + (up ? -7 : 7)) * vr;
-          c.beginPath();
-          c.arc(X, my, (k.strong ? 4 : 3) * hr, 0, Math.PI * 2);
-          if (k.kind === "trapped" || k.kind === "rejected") {
-            c.fillStyle = `rgb(${rgb})`;
-            c.fill();
-          } else {
-            c.strokeStyle = `rgba(${rgb},0.9)`;
-            c.lineWidth = 1.5 * hr;
-            c.stroke();
-          }
-          // A sweep draws the level it took, from where the level formed to the wick.
-          if (k.sweep) {
-            const yl = y(k.sweep.level);
-            const x0 = x(k.sweep.from);
-            if (yl !== null) {
-              c.strokeStyle = "rgba(245,166,35,0.85)";
-              c.lineWidth = hr;
-              c.setLineDash([4 * hr, 3 * hr]);
-              c.beginPath();
-              c.moveTo((x0 ?? xc - 40) * hr, yl * vr);
-              c.lineTo(X + 6 * hr, yl * vr);
-              c.stroke();
-              c.setLineDash([]);
-            }
-          }
-          if (k.strong && k.tag) labels.push({ text: k.tag, color: up ? "#e5534b" : "#2bbf85", x: X + 8 * hr, y: (yt + (up ? -16 : 4)) * vr });
+          c.fillStyle = `rgba(${k.side === "upper" ? "229,83,75" : "43,191,133"},${k.strong ? 0.9 : 0.55})`;
+          c.fillRect(xc * hr - 1.5 * hr, Math.min(yt, yb) * vr, 3 * hr, Math.max(1, Math.abs(yb - yt) * vr));
         }
       }
       // Labels go last on dark chips and step aside from each other, so overlapping zones stay named.

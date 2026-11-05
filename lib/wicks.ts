@@ -228,5 +228,5 @@ export function wickText(e: WickEvent, px: (x: number) => string, usd: (x: numbe
 // A short tag for the chart.
 export function wickTag(e: WickEvent, usd: (x: number) => string) {
   const flow = e.kind === "trapped" ? `TRAPPED ${usd(e.side === "upper" ? e.buy : e.sell)}` : e.kind === "rejected" ? `REJECTED ${usd(e.side === "upper" ? e.sell : e.buy)}` : "";
-  return [e.sweep ? "SWEEP" : "", flow].filter(Boolean).join(" · ");
+  return [e.sweep ? "SWEEP" : "", flow].filter(Boolean).join(" + ");
 }
