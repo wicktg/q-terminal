@@ -397,8 +397,23 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
   const [minUsd, setMinUsd] = useState(() => Number(stored("q.flowMin") ?? 1000) || 0);
   const minRef = useRef(minUsd);
   minRef.current = minUsd;
-  const [tf, setTf] = useState<(typeof TFS)[number]>("1h");
-  const [on, setOn] = useState({ struct: true, zones: true, fvg: true, wicks: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false });
+  // Timeframe and toggles are saved, so they survive switching tabs (which rebuilds the chart) and reloads.
+  const [tf, setTf] = useState<(typeof TFS)[number]>(() => {
+    const t = stored("q.chart.tf");
+    return (TFS as readonly string[]).includes(t ?? "") ? (t as (typeof TFS)[number]) : "1h";
+  });
+  const [on, setOn] = useState(() => {
+    const base = { struct: true, zones: true, fvg: true, wicks: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false };
+    try {
+      const saved = JSON.parse(stored("q.chart.on") ?? "{}") as Partial<typeof base>;
+      for (const k of Object.keys(base) as (keyof typeof base)[]) if (typeof saved[k] === "boolean") base[k] = saved[k];
+    } catch {
+      /* a bad saved value falls back to the defaults */
+    }
+    return base;
+  });
+  useEffect(() => store("q.chart.on", JSON.stringify(on)), [on]);
+  useEffect(() => store("q.chart.tf", tf), [tf]);
   const [feed, setFeed] = useState<"LIVE" | "POLL" | "NOT ON HL" | "...">("...");
   const api = useRef<{
     chart: IChartApi;
