@@ -12,6 +12,7 @@ import {
   type IPriceLine,
   type ISeriesApi,
   type ISeriesPrimitive,
+  type Logical,
   type SeriesAttachedParameter,
   type Time,
   type UTCTimestamp,
@@ -64,10 +65,14 @@ type DrawZone = { kind: string; side: number; t: number; top: number; bottom: nu
 type DrawSwing = { t: number; price: number; high: boolean; label: string };
 type DrawPool = { t: number; price: number };
 type DrawWick = WickEvent & { tag: string; strong: boolean };
+type Pt = { l: number; p: number }; // bar index and price
+type DrawMeasure = { a: Pt; b: Pt; up: boolean; lines: string[] };
 type Draw = {
   ribbon: { t: number; a: number; b: number }[];
   wicks: DrawWick[];
   showWicks: boolean;
+  measure: DrawMeasure | null;
+  measureHint: string | null;
   zones: DrawZone[];
   gaps: DrawZone[];
   swings: DrawSwing[];
@@ -116,7 +121,7 @@ function readChart(B: Bar[], tf: string) {
 
 // Draws what lightweight-charts has no series for: ribbon fill, order blocks, volume profile.
 class Overlay implements ISeriesPrimitive<Time> {
-  d: Draw = { ribbon: [], wicks: [], showWicks: false, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
+  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
   private p: SeriesAttachedParameter<Time> | null = null;
   attached(p: SeriesAttachedParameter<Time>) {
     this.p = p;
@@ -133,7 +138,74 @@ class Overlay implements ISeriesPrimitive<Time> {
     return [
       { zOrder: () => "bottom" as const, renderer: () => ({ draw: (t: never) => this.draw(t) }) },
       { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawWickMarks(t) }) },
+      { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawMeasure(t) }) },
     ];
+  }
+  // The ruler: a box from start to end with the move in price, percent, bars and time.
+  private drawMeasure(target: { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void }) {
+    const p = this.p;
+    const m = this.d.measure;
+    const hint = this.d.measureHint;
+    if (!p || (!m && !hint)) return;
+    target.useBitmapCoordinateSpace(({ context: c, horizontalPixelRatio: hr, verticalPixelRatio: vr, bitmapSize }) => {
+      const W = bitmapSize.width;
+      c.font = `600 ${11 * vr}px monospace`;
+      c.textBaseline = "middle";
+      if (hint) {
+        const w = c.measureText(hint).width + 16 * hr;
+        c.fillStyle = "rgba(245,166,35,0.95)";
+        const hy = bitmapSize.height - 30 * vr; // bottom of the price pane, clear of the price readout on phones
+        c.fillRect((W - w) / 2, hy, w, 18 * vr);
+        c.fillStyle = "#000";
+        c.fillText(hint, (W - w) / 2 + 8 * hr, hy + 9 * vr);
+      }
+      if (!m) return;
+      const ts_ = p.chart.timeScale();
+      const xa = ts_.logicalToCoordinate(m.a.l as Logical);
+      const xb = ts_.logicalToCoordinate(m.b.l as Logical);
+      const ya = p.series.priceToCoordinate(m.a.p);
+      const yb = p.series.priceToCoordinate(m.b.p);
+      if (xa === null || xb === null || ya === null || yb === null) return;
+      const rgb = m.up ? "43,191,133" : "229,83,75";
+      const [X0, X1, Y0, Y1] = [xa * hr, xb * hr, ya * vr, yb * vr];
+      c.fillStyle = `rgba(${rgb},0.13)`;
+      c.fillRect(Math.min(X0, X1), Math.min(Y0, Y1), Math.abs(X1 - X0), Math.abs(Y1 - Y0));
+      c.strokeStyle = `rgba(${rgb},0.85)`;
+      c.lineWidth = hr;
+      c.strokeRect(Math.min(X0, X1), Math.min(Y0, Y1), Math.abs(X1 - X0), Math.abs(Y1 - Y0));
+      // Arrow from start to end.
+      c.lineWidth = 1.5 * hr;
+      c.beginPath();
+      c.moveTo(X0, Y0);
+      c.lineTo(X1, Y1);
+      c.stroke();
+      const ang = Math.atan2(Y1 - Y0, X1 - X0);
+      const head = 8 * hr;
+      c.fillStyle = `rgb(${rgb})`;
+      c.beginPath();
+      c.moveTo(X1, Y1);
+      c.lineTo(X1 - head * Math.cos(ang - 0.45), Y1 - head * Math.sin(ang - 0.45));
+      c.lineTo(X1 - head * Math.cos(ang + 0.45), Y1 - head * Math.sin(ang + 0.45));
+      c.fill();
+      // Readout chip past the end of the move, kept inside the pane.
+      const lh = 15 * vr;
+      const w = Math.max(...m.lines.map((t) => c.measureText(t).width)) + 14 * hr;
+      const h = m.lines.length * lh + 6 * vr;
+      const cx = Math.min(Math.max(2 * hr, (X0 + X1) / 2 - w / 2), W - w - 2 * hr);
+      const top = Math.min(Y0, Y1);
+      const bottom = Math.max(Y0, Y1);
+      const cy = m.up ? (top - h - 6 * vr > 0 ? top - h - 6 * vr : bottom + 6 * vr) : bottom + h + 6 * vr < bitmapSize.height ? bottom + 6 * vr : top - h - 6 * vr;
+      c.fillStyle = "rgba(0,0,0,0.92)";
+      c.fillRect(cx, cy, w, h);
+      c.strokeStyle = `rgba(${rgb},0.9)`;
+      c.lineWidth = hr;
+      c.strokeRect(cx + 0.5 * hr, cy + 0.5 * vr, w - hr, h - vr);
+      m.lines.forEach((t, i) => {
+        c.fillStyle = i === 0 ? `rgb(${rgb})` : "#d9d9d9";
+        c.fillText(t, cx + 7 * hr, cy + 3 * vr + lh * i + lh / 2);
+      });
+      c.textBaseline = "alphabetic";
+    });
   }
   // Wick dots, sweep levels and labels sit above the candles so nothing covers them.
   private drawWickMarks(target: { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void }) {
@@ -439,6 +511,10 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
   onRef.current = on;
   const tfRef = useRef(tf);
   tfRef.current = tf;
+  const [measureOn, setMeasureOn] = useState(false);
+  const measuring = useRef(false);
+  measuring.current = measureOn;
+  const measure = useRef<{ a: Pt; b: Pt; done: boolean } | null>(null);
   const wickRead = useRef<WickRead | null>(null);
   const wicksCb = useRef(onWicks);
   wicksCb.current = onWicks;
@@ -491,11 +567,52 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
     const flowLayer = new FlowLayer(flowCanvas.current!, chart, candle);
     api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP, cvdS, overlay, cvdTag, flow: flowLayer, liq: [] };
 
+    const pointAt = (p: { point?: { x: number; y: number }; paneIndex?: number }) => {
+      if (!p.point || (p.paneIndex !== undefined && p.paneIndex !== 0)) return null;
+      const price = candle.coordinateToPrice(p.point.y);
+      const l = chart.timeScale().coordinateToLogical(p.point.x);
+      return price === null || l === null ? null : { l: Math.round(l), p: price };
+    };
     chart.subscribeCrosshairMove((p) => {
       hover.current = p.time ? (p.time as number) : null;
       renderLegend();
+      const m = measure.current;
+      const pt = m && !m.done ? pointAt(p) : null;
+      if (m && pt) {
+        m.b = pt;
+        drawMeasure();
+      }
     });
+    // MEASURE mode or Shift-click: first click starts, second ends, the next starts again.
+    // Read straight from the browser: the chart library drops a quick second click, and a fast tap-tap needs it.
+    let down: { x: number; y: number } | null = null;
+    const onDown = (e: PointerEvent) => {
+      down = { x: e.clientX, y: e.clientY };
+    };
+    const onPick = (e: MouseEvent) => {
+      const moved = down ? Math.hypot(e.clientX - down.x, e.clientY - down.y) : 0;
+      if (moved > 6) return; // the end of a drag that panned the chart, not a pick
+      const m = measure.current;
+      if (!measuring.current && !e.shiftKey) {
+        if (m?.done) {
+          measure.current = null; // a plain click clears a finished quick measure
+          drawMeasure();
+        }
+        return;
+      }
+      const r = el.getBoundingClientRect();
+      const y = e.clientY - r.top;
+      if (y > (chart.panes()[0]?.getHeight() ?? 0)) return; // only the price pane
+      const pt = pointAt({ point: { x: e.clientX - r.left - chart.priceScale("left").width(), y }, paneIndex: 0 });
+      if (!pt) return;
+      measure.current = !m || m.done ? { a: pt, b: pt, done: false } : { ...m, b: pt, done: true };
+      drawMeasure();
+    };
+    el.addEventListener("pointerdown", onDown);
+    el.addEventListener("click", onPick);
     return () => {
+      el.removeEventListener("pointerdown", onDown);
+      el.removeEventListener("click", onPick);
       flowLayer.stop();
       api.current = null;
       chart.remove();
@@ -512,6 +629,28 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
     const wk = onRef.current.wicks ? (wickRead.current?.events ?? []).filter((e) => e.t === b.t) : [];
     const wickLines = wk.map((e) => `<div class="lg-wick ${e.side === "upper" ? "down" : "up"}">${wickText(e, fmtPx, fmtUsd)}</div>`).join("");
     L.innerHTML = `O<b>${fmtPx(b.o)}</b>H<b>${fmtPx(b.h)}</b>L<b>${fmtPx(b.l)}</b>C<b>${fmtPx(b.c)}</b><b class="${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</b>VOL<b>${fmtUsd(b.q)}</b>DELTA<b class="${d >= 0 ? "up" : "down"}">${fmtUsd(d)}</b>${wickLines}`;
+  };
+
+  // Builds the ruler readout: price move, percent, bars and elapsed time.
+  const drawMeasure = () => {
+    const a = api.current;
+    if (!a) return;
+    const m = measure.current;
+    const hint = measuring.current && (!m || m.done) ? (m ? "Click or tap a new start point" : "Click or tap the start point") : m && !m.done ? "Click or tap the end point" : null;
+    if (!m) {
+      a.overlay.update({ measure: null, measureHint: hint });
+      return;
+    }
+    const dp = m.b.p - m.a.p;
+    const bars = Math.round(m.b.l - m.a.l);
+    const secs = Math.abs(bars) * TF_SEC[tfRef.current];
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const mins = Math.round((secs % 3600) / 60);
+    const dur = d ? `${d}d${h ? ` ${h}h` : ""}` : h ? `${h}h${mins ? ` ${mins}m` : ""}` : `${mins}m`;
+    const sign = dp >= 0 ? "+" : "-";
+    const lines = [`${sign}${fmtPx(Math.abs(dp))}  ${sign}${Math.abs((dp / m.a.p) * 100).toFixed(2)}%`, `${Math.abs(bars)} bar${Math.abs(bars) === 1 ? "" : "s"} · ${dur}`, `${fmtPx(m.a.p)} → ${fmtPx(m.b.p)}`];
+    a.overlay.update({ measure: { a: m.a, b: m.b, up: dp >= 0, lines }, measureHint: hint });
   };
 
   // Wick events placed on the candles the chart is drawing, so they sit on the right wick even in HL FLOW.
@@ -828,6 +967,24 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sym, tf, flow]);
 
+  // The ruler resets with the coin or timeframe, shows its hint while the mode is on, and Esc clears it.
+  useEffect(() => {
+    measure.current = null;
+    drawMeasure();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sym, tf, measureOn]);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || (!measure.current && !measuring.current)) return;
+      measure.current = null;
+      setMeasureOn(false);
+      drawMeasure();
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Axis decimals follow the coin's tick size once the watchlist has loaded it.
   useEffect(() => {
     if (digits !== undefined) api.current?.candle.applyOptions({ priceFormat: { type: "price", precision: digits, minMove: 10 ** -digits } });
@@ -946,6 +1103,10 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
             {t.toUpperCase()}
           </button>
         ))}
+        <span className="sep" />
+        <button data-on={measureOn} title="Measure a move: click a start and an end. Shift-click works any time, Esc clears." onClick={() => setMeasureOn((v) => !v)}>
+          MEASURE
+        </button>
         <span className="sep" />
         {toggles.map(([k, label]) => (
           <button key={k} data-on={on[k]} onClick={() => setOn((s) => ({ ...s, [k]: !s[k] }))}>

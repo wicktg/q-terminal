@@ -78,3 +78,7 @@ The ABSORB tab measures how much aggressive flow each 1H and 4H zone has soaked 
 
 The chart's WICKS button reads candle wicks two ways. Wick flow measures market buying and selling inside each meaningful wick from smaller perp candles (1-minute for 5M and 15M charts, 5-minute for 1H, 15-minute for 4H, hourly for 1D), so a wick reads as buyers or sellers trapped, an active rejection, a thin poke, or two-way. The sweep detector flags wicks that ran through a swing high or low, equal highs or lows, or the prior day's high or low and closed back inside, and tracks whether price has stayed back since. The side panel lists the latest reads and a track record: how often each pattern moved price its way within 8 candles on that coin and timeframe, against how often price moved that way anyway. `lib/wicks.ts` holds the maths and `app/api/wicks` serves it. The track record is descriptive and unvalidated, and small samples are anecdotal.
 
+## Measure
+
+The chart's MEASURE button is a ruler: click or tap a start and an end point to see the move in price, percent, bars and elapsed time. On desktop, Shift-click measures without turning the mode on, a plain click clears a finished measure, and Esc clears everything. Clicks are read from the browser rather than the chart library, because the library drops a quick second click.
+
