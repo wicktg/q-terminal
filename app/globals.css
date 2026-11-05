@@ -96,6 +96,9 @@ table { border-collapse: collapse; width: 100%; }
 .flow-min input:focus { border-color: var(--amber); }
 .legend { position: absolute; left: 8px; top: 6px; z-index: 3; pointer-events: none; color: var(--dim); font-size: 11px; white-space: nowrap; background: rgba(0, 0, 0, .8); padding: 1px 4px; }
 .legend b { color: var(--text); font-weight: 500; margin: 0 8px 0 3px; }
+.lg-wick { white-space: normal; max-width: 560px; margin-top: 2px; font-size: 11px; line-height: 1.45; }
+.wk { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 6px; padding: 5px 10px; border-bottom: 1px solid #141414; font-size: 11px; line-height: 1.45; color: #e2e2e2; }
+.wk-stats td:first-child { white-space: normal; }
 .pane-tag { position: absolute; left: 8px; z-index: 3; pointer-events: none; color: var(--faint); font-size: 10px; letter-spacing: .05em; }
 
 /* generic data tables */

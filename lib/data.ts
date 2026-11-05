@@ -55,6 +55,20 @@ export const perpKlines = (sym: string, tf: string, limit: number) =>
     (await json<RawKline[]>(`${FAPI}/fapi/v1/klines?symbol=${sym}USDT&interval=${tf}&limit=${limit}`)).map(toBar),
   );
 
+// Several pages of perp klines, oldest first, for when one request of 1,500 is not enough history.
+export const perpKlinesPaged = (sym: string, tf: string, pages: number) =>
+  cached(`kp:${sym}:${tf}:${pages}`, ttlFor(tf, 1500), async () => {
+    const out: Bar[][] = [];
+    let end = "";
+    for (let p = 0; p < pages; p++) {
+      const rows = await json<RawKline[]>(`${FAPI}/fapi/v1/klines?symbol=${sym}USDT&interval=${tf}&limit=1500${end}`);
+      if (!rows.length) break;
+      out.unshift(rows.map(toBar));
+      end = `&endTime=${Number(rows[0][0]) - 1}`;
+    }
+    return out.flat();
+  });
+
 export const spotKlines = (sym: string, tf: string, limit: number) =>
   cached(`s:${sym}:${tf}:${limit}`, ttlFor(tf, limit), async () => {
     try {

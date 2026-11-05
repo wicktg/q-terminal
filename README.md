@@ -73,3 +73,8 @@ The TPO tab draws a Market Profile for each UTC day from 30-minute bars: one let
 ## Absorption
 
 The ABSORB tab measures how much aggressive flow each 1H and 4H zone has soaked up: market sells into demand, market buys into supply. It uses Binance perp and spot taker data on 15-minute bars, split by how much of each bar sat in the zone. It also lists bars in the heaviest tenth of one-sided flow where price still failed to move, which shows passive orders absorbing. `lib/absorb.ts` holds the maths and `components/AbsorbTab.tsx` the view. It cannot see what is still resting in the book.
+
+## Wicks
+
+The chart's WICKS button reads candle wicks two ways. Wick flow measures market buying and selling inside each meaningful wick from smaller perp candles (1-minute for 5M and 15M charts, 5-minute for 1H, 15-minute for 4H, hourly for 1D), so a wick reads as buyers or sellers trapped, an active rejection, a thin poke, or two-way. The sweep detector flags wicks that ran through a swing high or low, equal highs or lows, or the prior day's high or low and closed back inside, and tracks whether price has stayed back since. The side panel lists the latest reads and a track record: how often each pattern moved price its way within 8 candles on that coin and timeframe, against how often price moved that way anyway. `lib/wicks.ts` holds the maths and `app/api/wicks` serves it. The track record is descriptive and unvalidated, and small samples are anecdotal.
+

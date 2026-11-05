@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AbsorbTab from "./AbsorbTab.tsx";
 import TpoTab from "./TpoTab.tsx";
 import { useJson } from "./use-json.ts";
+import { wickText, type WickRead } from "@/lib/wicks.ts";
 import type { Analysis, Book, Forecast, Frame, NewsItem, NewsResp, ScreenerRow, UniverseCoin } from "@/lib/types.ts";
 import { fmtPct, fmtPx, fmtUsd, pxDigits, setActiveSym, setPriceDigits, toneClass } from "@/lib/format.ts";
 
@@ -36,7 +37,49 @@ function FrameRow({ f }: { f: Frame }) {
   );
 }
 
-function StructurePanel({ a, price }: { a: Analysis | null; price: number }) {
+const since = (t: number) => {
+  const m = Math.max(0, Math.round((Date.now() / 1000 - t) / 60));
+  return m < 60 ? `${m}m` : m < 2880 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+};
+const pctOf = (x: number) => `${Math.round(x * 100)}%`;
+
+function WickPanel({ w }: { w: WickRead }) {
+  const recent = [...w.events].filter((e) => e.sweep || e.score >= 1).sort((x, y) => y.t - x.t).slice(0, 4);
+  const stats = w.stats.filter((s) => s.n >= 5);
+  return (
+    <>
+      <div className="h">WICKS<span>{w.tf.toUpperCase()} candles, latest first</span></div>
+      {recent.length ? (
+        recent.map((e) => (
+          <div className="wk" key={`${e.t}${e.side}`}>
+            <span className={e.side === "upper" ? "down" : "up"}>{e.side === "upper" ? "▼" : "▲"}</span>
+            <span>{wickText(e, fmtPx, fmtUsd)}</span>
+            <span className="dim">{since(e.t)}</span>
+          </div>
+        ))
+      ) : (
+        <div className="note">No meaningful wicks or sweeps lately.</div>
+      )}
+      <div className="h">WICK TRACK RECORD<span>{w.sym} {w.tf.toUpperCase()}, next {w.horizon} candles</span></div>
+      <table className="stat wk-stats">
+        <tbody>
+          {stats.map((s) => (
+            <tr key={s.key}>
+              <td>{s.label}</td>
+              <td>
+                <span className={s.hit > s.base + 0.05 ? "up" : s.hit < s.base - 0.05 ? "down" : ""}>{pctOf(s.hit)}</span>{" "}
+                <span className="dim">vs {pctOf(s.base)} · {s.n}</span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="note">How often price moved the wick&apos;s way within {w.horizon} candles, against how often it moved that way anyway, with the number of cases. Under 20 cases is anecdotal.</div>
+    </>
+  );
+}
+
+function StructurePanel({ a, price, wicks }: { a: Analysis | null; price: number; wicks?: WickRead | null }) {
   if (!a) return <Loading />;
   const px = price || a.price;
   const above = a.ta.zones.filter((z) => z.dist > 0).slice(0, 3).reverse();
@@ -59,6 +102,7 @@ function StructurePanel({ a, price }: { a: Analysis | null; price: number }) {
       {inside.map((z) => <Z key={`${z.tf}${z.kind}${z.top}${z.bottom}`} z={z} />)}
       {below.map((z) => <Z key={`${z.tf}${z.kind}${z.top}${z.bottom}`} z={z} />)}
       {!a.ta.zones.length && <div className="note">No fresh zones within 15% of price.</div>}
+      {wicks && wicks.sym === a.sym && <WickPanel w={wicks} />}
     </>
   );
 }
@@ -411,6 +455,7 @@ export default function Terminal() {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [live, setLive] = useState<number | null>(null);
+  const [wicks, setWicks] = useState<WickRead | null>(null);
   const [tick, setTick] = useState<Record<string, Tick>>({});
   const tickAt = useRef(0);
   const search = useRef<HTMLInputElement>(null);
@@ -570,8 +615,8 @@ export default function Terminal() {
         <main className={`main ${tab === "CHART" || tab === "TPO" ? "fill" : ""}`}>
           {tab === "CHART" && (
             <>
-              <Chart sym={sym} analysis={a} onPrice={setLive} digits={pxDigits(price || 1, sym)} />
-              <div className="ctx-inline"><StructurePanel a={a} price={price} /></div>
+              <Chart sym={sym} analysis={a} onPrice={setLive} digits={pxDigits(price || 1, sym)} onWicks={setWicks} />
+              <div className="ctx-inline"><StructurePanel a={a} price={price} wicks={wicks} /></div>
             </>
           )}
           {tab === "ZONES" && <Zones sym={sym} a={a} />}
@@ -582,7 +627,7 @@ export default function Terminal() {
           {tab === "CONTEXT" && <ContextTab a={a} sym={sym} />}
         </main>
 
-        <section className="ctx"><StructurePanel a={a} price={price} /></section>
+        <section className="ctx"><StructurePanel a={a} price={price} wicks={wicks} /></section>
       </div>
 
       <nav className="mob-nav">

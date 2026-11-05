@@ -23,6 +23,7 @@ import { poolsAt, walk, zonesAt } from "@/lib/structure.ts";
 import { fmtPx, fmtUsd, hlBar, hlName, pxDigits, type HlCandle } from "@/lib/format.ts";
 import { FlowLayer } from "./flow-layer.ts";
 import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
+import { wickTag, wickText, type WickEvent, type WickRead } from "@/lib/wicks.ts";
 
 const TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
 const TF_SEC: Record<(typeof TFS)[number], number> = { "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
@@ -62,8 +63,11 @@ type HlLevel = { px: string; sz: string };
 type DrawZone = { kind: string; side: number; t: number; top: number; bottom: number };
 type DrawSwing = { t: number; price: number; high: boolean; label: string };
 type DrawPool = { t: number; price: number };
+type DrawWick = WickEvent & { tag: string; strong: boolean };
 type Draw = {
   ribbon: { t: number; a: number; b: number }[];
+  wicks: DrawWick[];
+  showWicks: boolean;
   zones: DrawZone[];
   gaps: DrawZone[];
   swings: DrawSwing[];
@@ -112,7 +116,7 @@ function readChart(B: Bar[], tf: string) {
 
 // Draws what lightweight-charts has no series for: ribbon fill, order blocks, volume profile.
 class Overlay implements ISeriesPrimitive<Time> {
-  d: Draw = { ribbon: [], zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
+  d: Draw = { ribbon: [], wicks: [], showWicks: false, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
   private p: SeriesAttachedParameter<Time> | null = null;
   attached(p: SeriesAttachedParameter<Time>) {
     this.p = p;
@@ -212,6 +216,48 @@ class Overlay implements ISeriesPrimitive<Time> {
           labels.push({ text: z.kind === "OB" ? "OB" : up ? "DEMAND" : "SUPPLY", color: up ? "#2bbf85" : "#e5534b", x: r.left + 4 * hr, y: r.top + 2 * vr });
         }
       }
+      if (this.d.showWicks) {
+        for (const k of this.d.wicks) {
+          const xc = x(k.t);
+          const yt = y(k.tip);
+          const yb = y(k.base);
+          if (xc === null || yt === null || yb === null) continue;
+          const up = k.side === "upper";
+          const rgb = up ? "229,83,75" : "43,191,133";
+          const X = xc * hr;
+          // The wick itself, thickened in its colour behind the candle so it stands out.
+          c.fillStyle = `rgba(${rgb},${k.strong ? 0.9 : 0.55})`;
+          c.fillRect(X - 1.5 * hr, Math.min(yt, yb) * vr, 3 * hr, Math.max(1, Math.abs(yb - yt) * vr));
+          // A dot past the tip: solid when the flow shows who drove the wick, hollow when thin or two-way.
+          const my = (yt + (up ? -7 : 7)) * vr;
+          c.beginPath();
+          c.arc(X, my, (k.strong ? 4 : 3) * hr, 0, Math.PI * 2);
+          if (k.kind === "trapped" || k.kind === "rejected") {
+            c.fillStyle = `rgb(${rgb})`;
+            c.fill();
+          } else {
+            c.strokeStyle = `rgba(${rgb},0.9)`;
+            c.lineWidth = 1.5 * hr;
+            c.stroke();
+          }
+          // A sweep draws the level it took, from where the level formed to the wick.
+          if (k.sweep) {
+            const yl = y(k.sweep.level);
+            const x0 = x(k.sweep.from);
+            if (yl !== null) {
+              c.strokeStyle = "rgba(245,166,35,0.85)";
+              c.lineWidth = hr;
+              c.setLineDash([4 * hr, 3 * hr]);
+              c.beginPath();
+              c.moveTo((x0 ?? xc - 40) * hr, yl * vr);
+              c.lineTo(X + 6 * hr, yl * vr);
+              c.stroke();
+              c.setLineDash([]);
+            }
+          }
+          if (k.strong && k.tag) labels.push({ text: k.tag, color: up ? "#e5534b" : "#2bbf85", x: X + 8 * hr, y: (yt + (up ? -16 : 4)) * vr });
+        }
+      }
       // Labels go last on dark chips and step aside from each other, so overlapping zones stay named.
       const chipH = 13 * vr;
       const placed: { x: number; y: number; w: number }[] = [];
@@ -289,9 +335,9 @@ class PaneLabel implements ISeriesPrimitive<Time> {
   }
 }
 
-type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; digits?: number };
+type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void };
 
-export default function Chart({ sym, analysis, onPrice, digits }: Props) {
+export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const legend = useRef<HTMLDivElement>(null);
   const flowCanvas = useRef<HTMLCanvasElement>(null);
@@ -300,7 +346,7 @@ export default function Chart({ sym, analysis, onPrice, digits }: Props) {
   const minRef = useRef(minUsd);
   minRef.current = minUsd;
   const [tf, setTf] = useState<(typeof TFS)[number]>("1h");
-  const [on, setOn] = useState({ struct: true, zones: true, fvg: true, ema: false, ribbon: false, vp: false, tpo: false, liq: false });
+  const [on, setOn] = useState({ struct: true, zones: true, fvg: true, wicks: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false });
   const [feed, setFeed] = useState<"LIVE" | "POLL" | "NOT ON HL" | "...">("...");
   const api = useRef<{
     chart: IChartApi;
@@ -326,6 +372,9 @@ export default function Chart({ sym, analysis, onPrice, digits }: Props) {
   onRef.current = on;
   const tfRef = useRef(tf);
   tfRef.current = tf;
+  const wickRead = useRef<WickRead | null>(null);
+  const wicksCb = useRef(onWicks);
+  wicksCb.current = onWicks;
   const priceCb = useRef(onPrice);
   priceCb.current = onPrice;
 
@@ -393,7 +442,23 @@ export default function Chart({ sym, analysis, onPrice, digits }: Props) {
     const chg = ((b.c - b.o) / b.o) * 100;
     const taker = tape.current.length ? tape.current.find((x) => x.t === b.t) : b;
     const d = taker ? delta(taker) : 0;
-    L.innerHTML = `O<b>${fmtPx(b.o)}</b>H<b>${fmtPx(b.h)}</b>L<b>${fmtPx(b.l)}</b>C<b>${fmtPx(b.c)}</b><b class="${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</b>VOL<b>${fmtUsd(b.q)}</b>DELTA<b class="${d >= 0 ? "up" : "down"}">${fmtUsd(d)}</b>`;
+    const wk = onRef.current.wicks ? (wickRead.current?.events ?? []).filter((e) => e.t === b.t) : [];
+    const wickLines = wk.map((e) => `<div class="lg-wick ${e.side === "upper" ? "down" : "up"}">${wickText(e, fmtPx, fmtUsd)}</div>`).join("");
+    L.innerHTML = `O<b>${fmtPx(b.o)}</b>H<b>${fmtPx(b.h)}</b>L<b>${fmtPx(b.l)}</b>C<b>${fmtPx(b.c)}</b><b class="${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</b>VOL<b>${fmtUsd(b.q)}</b>DELTA<b class="${d >= 0 ? "up" : "down"}">${fmtUsd(d)}</b>${wickLines}`;
+  };
+
+  // Wick events placed on the candles the chart is drawing, so they sit on the right wick even in HL FLOW.
+  const mapWicks = (): DrawWick[] => {
+    const r = wickRead.current;
+    if (!r) return [];
+    const byT = new Map(bars.current.map((x) => [x.t, x]));
+    return r.events.flatMap((e) => {
+      const k = byT.get(e.t);
+      if (!k) return [];
+      const up = e.side === "upper";
+      const strong = e.score >= 1.6 || (!!e.sweep && (e.kind === "trapped" || e.kind === "rejected"));
+      return [{ ...e, tip: up ? k.h : k.l, base: up ? Math.max(k.o, k.c) : Math.min(k.o, k.c), tag: wickTag(e, fmtUsd), strong }];
+    });
   };
 
   const paint = (full: boolean) => {
@@ -467,6 +532,8 @@ export default function Chart({ sym, analysis, onPrice, digits }: Props) {
       showFvg: onRef.current.fvg,
       showStruct: onRef.current.struct,
       showVp: onRef.current.vp,
+      wicks: onRef.current.wicks ? mapWicks() : [],
+      showWicks: onRef.current.wicks,
     });
     priceCb.current(B[B.length - 1].c);
     renderLegend();
@@ -729,6 +796,34 @@ export default function Chart({ sym, analysis, onPrice, digits }: Props) {
       });
   }, [analysis, on.liq, sym]);
 
+  // Wick flow and sweeps for this coin and timeframe, refreshed while the toggle is on.
+  useEffect(() => {
+    wickRead.current = null;
+    wicksCb.current?.(null);
+    if (!on.wicks) return;
+    let dead = false;
+    const load = async () => {
+      try {
+        const r = (await (await fetch(`/api/wicks?sym=${sym}&tf=${tf}`)).json()) as WickRead & { error?: string };
+        if (dead || !r.events) return;
+        wickRead.current = r;
+        wicksCb.current?.(r);
+        paint(false);
+      } catch {
+        /* the next refresh retries */
+      }
+    };
+    void load();
+    const id = setInterval(load, 20000);
+    return () => {
+      dead = true;
+      clearInterval(id);
+      wickRead.current = null;
+      wicksCb.current?.(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [on.wicks, sym, tf]);
+
   // TPO levels as price lines: the live session's POC and value area, and untested POCs nearby.
   useEffect(() => {
     if (!on.tpo) return;
@@ -769,6 +864,7 @@ export default function Chart({ sym, analysis, onPrice, digits }: Props) {
     ["struct", "STRUCTURE"],
     ["zones", "ZONES"],
     ["fvg", "FVG"],
+    ["wicks", "WICKS"],
     ["ema", "EMA"],
     ["ribbon", "AVWAP"],
     ["vp", "VP"],
