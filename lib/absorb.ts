@@ -40,7 +40,7 @@ export type AbsorbRead = {
   day: { sellers: number; buyers: number; nSellers: number; nBuyers: number };
 };
 
-type Flow = { t: number; o: number; h: number; l: number; c: number; buy: number; sell: number };
+export type Flow = { t: number; o: number; h: number; l: number; c: number; buy: number; sell: number };
 
 const SEC15 = 900;
 const TF_SEC = { "1H": 3600, "4H": 14400 } as const;
@@ -48,7 +48,7 @@ const REACT_BARS = 16; // how far after a visit to look for the bounce, in 15-mi
 const BROKEN_DAYS = 3;
 
 // Taker buys and sells in dollars per bar, perps and spot added together.
-function flows(perp: Bar[], spot: Bar[]): Flow[] {
+export function flows(perp: Bar[], spot: Bar[]): Flow[] {
   const sp = new Map(spot.map((b) => [b.t, b]));
   return perp.map((b) => {
     const typ = (b.h + b.l + b.c) / 3;
@@ -65,13 +65,13 @@ function flows(perp: Bar[], spot: Bar[]): Flow[] {
 }
 
 // Share of a bar's range that sat inside the zone, used to split its volume.
-const overlap = (f: Flow, top: number, bottom: number) => {
+export const overlap = (f: Flow, top: number, bottom: number) => {
   const inside = Math.min(f.h, top) - Math.max(f.l, bottom);
   if (inside < 0) return 0;
   return f.h > f.l ? inside / (f.h - f.l) : 1;
 };
 
-function measure(F: Flow[], side: 1 | -1, top: number, bottom: number, from: number, to: number, price: number) {
+export function measure(F: Flow[], side: 1 | -1, top: number, bottom: number, from: number, to: number, price: number) {
   let [absorbed, opposing, deepest, touches, gap] = [0, 0, 0, 0, 99];
   let cur: { absorbed: number; opposing: number } | null = null;
   const visits: [number, number][] = [];

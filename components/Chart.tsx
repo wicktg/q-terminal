@@ -23,6 +23,7 @@ import { colsFromBars } from "@/lib/mtf.ts";
 import { poolsAt, walk, zonesAt } from "@/lib/structure.ts";
 import { fmtPx, fmtUsd, hlBar, hlName, pxDigits, type HlCandle } from "@/lib/format.ts";
 import { FlowLayer } from "./flow-layer.ts";
+import ZoneCard, { type CardZone } from "./ZoneCard.tsx";
 import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
 import { wickTag, wickText, type WickEvent, type WickRead } from "@/lib/wicks.ts";
 
@@ -61,7 +62,8 @@ const store = (k: string, v: string) => {
 type HlTrade = { side: "A" | "B"; px: string; sz: string; time: number; hash: string };
 type HlLevel = { px: string; sz: string };
 
-type DrawZone = { kind: string; side: number; t: number; top: number; bottom: number };
+type DrawZone = { kind: string; side: number; t: number; top: number; bottom: number; born?: number };
+type ZoneAmount = { usd: number; complete: boolean };
 type DrawSwing = { t: number; price: number; high: boolean; label: string };
 type DrawPool = { t: number; price: number };
 type DrawWick = WickEvent & { tag: string; strong: boolean };
@@ -73,6 +75,7 @@ type Draw = {
   showWicks: boolean;
   measure: DrawMeasure | null;
   measureHint: string | null;
+  zoneUsd: Record<string, ZoneAmount>; // resting size per zone, keyed top|bottom
   zones: DrawZone[];
   gaps: DrawZone[];
   swings: DrawSwing[];
@@ -98,6 +101,7 @@ function mergeZones(rows: DrawZone[]) {
     m.top = Math.max(m.top, z.top);
     m.bottom = Math.min(m.bottom, z.bottom);
     m.t = Math.min(m.t, z.t);
+    if (z.born !== undefined) m.born = Math.min(m.born ?? z.born, z.born);
   }
   return out;
 }
@@ -111,7 +115,7 @@ function readChart(B: Bar[], tf: string) {
   const px = closed[i].c;
   const live = zonesAt(w, i)
     .sort((a, b) => Math.abs((a.top + a.bottom) / 2 - px) - Math.abs((b.top + b.bottom) / 2 - px))
-    .map((z) => ({ kind: z.kind, side: z.side, t: closed[z.origin].t, top: z.top, bottom: z.bottom }));
+    .map((z) => ({ kind: z.kind, side: z.side, t: closed[z.origin].t, top: z.top, bottom: z.bottom, born: closed[z.born].t + (TF_SEC[tf as (typeof TFS)[number]] ?? 3600) }));
   const zones = mergeZones(live.filter((z) => z.kind !== "FVG")).slice(0, 8);
   const gaps = mergeZones(live.filter((z) => z.kind === "FVG")).slice(0, 6);
   const swings = w.swings.slice(-24).map((s) => ({ t: closed[s.i].t, price: s.price, high: s.high, label: s.label }));
@@ -121,7 +125,7 @@ function readChart(B: Bar[], tf: string) {
 
 // Draws what lightweight-charts has no series for: ribbon fill, order blocks, volume profile.
 class Overlay implements ISeriesPrimitive<Time> {
-  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
+  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zoneUsd: {}, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
   private p: SeriesAttachedParameter<Time> | null = null;
   attached(p: SeriesAttachedParameter<Time>) {
     this.p = p;
@@ -368,7 +372,9 @@ class Overlay implements ISeriesPrimitive<Time> {
             c.strokeRect(r.left, r.top, r.w, r.h);
             c.setLineDash([]);
           }
-          labels.push({ text: z.kind === "OB" ? "OB" : up ? "DEMAND" : "SUPPLY", color: up ? "#2bbf85" : "#e5534b", x: r.left + 4 * hr, y: r.top + 2 * vr });
+          const amt = this.d.zoneUsd[`${z.top}|${z.bottom}`];
+          const name = z.kind === "OB" ? (up ? "DEMAND OB" : "SUPPLY OB") : up ? "DEMAND" : "SUPPLY";
+          labels.push({ text: amt ? `${name} ${fmtUsd(amt.usd)}${amt.complete ? "" : "+"}` : name, color: up ? "#2bbf85" : "#e5534b", x: r.left + 4 * hr, y: r.top + 2 * vr });
         }
       }
       if (this.d.showWicks) {
@@ -512,6 +518,9 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
   const tfRef = useRef(tf);
   tfRef.current = tf;
   const [measureOn, setMeasureOn] = useState(false);
+  const [card, setCard] = useState<CardZone | null>(null);
+  const zoneLoad = useRef<(() => void) | null>(null);
+  const zoneKey = useRef("");
   const measuring = useRef(false);
   measuring.current = measureOn;
   const measure = useRef<{ a: Pt; b: Pt; done: boolean } | null>(null);
@@ -585,6 +594,24 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
     });
     // MEASURE mode or Shift-click: first click starts, second ends, the next starts again.
     // Read straight from the browser: the chart library drops a quick second click, and a fast tap-tap needs it.
+    // The zone under a click, picking the tightest when zones overlap.
+    const zoneAt = (e: MouseEvent): CardZone | null => {
+      const o = api.current?.overlay.d;
+      if (!o?.showZones) return null;
+      const r = el.getBoundingClientRect();
+      const y = e.clientY - r.top;
+      if (y > (chart.panes()[0]?.getHeight() ?? 0)) return null;
+      const x = e.clientX - r.left - chart.priceScale("left").width();
+      const price = candle.coordinateToPrice(y);
+      if (price === null) return null;
+      const hits = o.zones.filter((z) => {
+        if (price < z.bottom || price > z.top) return false;
+        const first = o.times.find((t) => t >= z.t);
+        const left = first === undefined ? null : chart.timeScale().timeToCoordinate(ts(first));
+        return left === null || x >= left;
+      });
+      return hits.sort((a, b) => a.top - a.bottom - (b.top - b.bottom))[0] ?? null;
+    };
     let down: { x: number; y: number } | null = null;
     const onDown = (e: PointerEvent) => {
       down = { x: e.clientX, y: e.clientY };
@@ -597,7 +624,9 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
         if (m?.done) {
           measure.current = null; // a plain click clears a finished quick measure
           drawMeasure();
+          return;
         }
+        setCard(zoneAt(e));
         return;
       }
       const r = el.getBoundingClientRect();
@@ -741,6 +770,14 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
       wicks: onRef.current.wicks ? mapWicks() : [],
       showWicks: onRef.current.wicks,
     });
+    // New or moved zones fetch their resting size straight away rather than at the next refresh.
+    if (full) {
+      const key = a.overlay.d.zones.map((z) => `${z.top}|${z.bottom}`).join(",");
+      if (key !== zoneKey.current) {
+        zoneKey.current = key;
+        zoneLoad.current?.();
+      }
+    }
     priceCb.current(B[B.length - 1].c);
     renderLegend();
   };
@@ -967,6 +1004,39 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sym, tf, flow]);
 
+  // Resting size inside each zone on screen, for the zone labels. Refreshes while zones are shown.
+  useEffect(() => {
+    setCard(null);
+    if (!on.zones) return;
+    let dead = false;
+    const load = async () => {
+      const zs = api.current?.overlay.d.zones ?? [];
+      if (!zs.length) return;
+      try {
+        const q = zs.map((z) => `${z.bottom}_${z.top}_${z.side}`).join(",");
+        const r = (await (await fetch(`/api/zone-liq?sym=${sym}&z=${q}`)).json()) as ZoneAmount[];
+        if (dead || !Array.isArray(r)) return;
+        const map: Record<string, ZoneAmount> = {};
+        zs.forEach((z, i) => {
+          if (r[i]) map[`${z.top}|${z.bottom}`] = r[i];
+        });
+        api.current?.overlay.update({ zoneUsd: map });
+      } catch {
+        /* the next refresh retries */
+      }
+    };
+    zoneLoad.current = () => void load();
+    zoneKey.current = "";
+    void load();
+    const id = setInterval(load, 10000);
+    return () => {
+      dead = true;
+      zoneLoad.current = null;
+      clearInterval(id);
+      api.current?.overlay.update({ zoneUsd: {} });
+    };
+  }, [on.zones, sym, tf]);
+
   // The ruler resets with the coin or timeframe, shows its hint while the mode is on, and Esc clears it.
   useEffect(() => {
     measure.current = null;
@@ -1140,6 +1210,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
       <div className="chart-wrap">
         <div ref={legend} className="legend" />
         <div ref={host} className="chart-host" />
+        {card && <ZoneCard key={`${sym}${card.top}${card.bottom}`} sym={sym} z={card} onClose={() => setCard(null)} />}
         <canvas ref={flowCanvas} className="flow-layer" />
       </div>
     </>

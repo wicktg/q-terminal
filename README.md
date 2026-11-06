@@ -82,3 +82,7 @@ The chart's WICKS button reads candle wicks two ways. Wick flow measures market 
 
 The chart's MEASURE button is a ruler: click or tap a start and an end point to see the move in price, percent, bars and elapsed time. On desktop, Shift-click measures without turning the mode on, a plain click clears a finished measure, and Esc clears everything. Clicks are read from the browser rather than the chart library, because the library drops a quick second click.
 
+## Zone size
+
+Each supply and demand label on the chart shows the resting limit orders inside its price range right now, in dollars, summed across Binance perps, Bybit, Binance spot and Hyperliquid. `lib/data.ts` (`deepBooks`) fetches the books and `lib/zoneliq.ts` adds them up: exact orders count where they sit, and Hyperliquid's grouped levels beyond its finest book count in proportion to how much of each price bucket overlaps the zone. Binance perps reach about 1 to 2% from price and Bybit less, so a zone further out shows a minimum with a `+`. Tapping a zone opens a card with the amount by venue, delta over the last hour for the whole market and inside the zone, and the flow it has absorbed since it formed (`app/api/zone`). The card refreshes every 10 seconds.
+

@@ -150,6 +150,74 @@ export const depthAll = (sym: string) =>
     return out;
   });
 
+// Deep order books for measuring resting size inside a price range. Each level is a segment: exact orders have
+// lo === hi, grouped Hyperliquid levels span a price bucket. `bidReach` and `askReach` say how far each book sees.
+export type BookSeg = { lo: number; hi: number; usd: number };
+export type DeepBook = { venue: string; bids: BookSeg[]; asks: BookSeg[]; bidReach: number; askReach: number };
+type HlLevel = { px: string; sz: string };
+
+// Hyperliquid shows 20 levels per side, so finer books cover near price and coarser grouped books extend the reach.
+async function hlLadder(coin: string): Promise<DeepBook | null> {
+  const sigs = [0, 4, 3, 2];
+  const books = await Promise.all(sigs.map((n) => hl<{ levels: HlLevel[][] }>(n ? { type: "l2Book", coin, nSigFigs: n } : { type: "l2Book", coin }).catch(() => null)));
+  if (!books[0]?.levels) return null;
+  const sides = [0, 1].map((k) => {
+    const bid = k === 0;
+    const segs: BookSeg[] = [];
+    let reach = NaN;
+    books.forEach((b, j) => {
+      const rows = (b?.levels?.[k] ?? []).map((x) => ({ px: +x.px, usd: +x.px * +x.sz }));
+      if (!rows.length) return;
+      if (j === 0) {
+        for (const r of rows) segs.push({ lo: r.px, hi: r.px, usd: r.usd });
+        reach = bid ? Math.min(...rows.map((r) => r.px)) : Math.max(...rows.map((r) => r.px));
+        return;
+      }
+      const gaps = rows.slice(1).map((r, i) => Math.abs(r.px - rows[i].px)).filter((g) => g > 0);
+      const step = gaps.length ? Math.min(...gaps) : 10 ** (Math.floor(Math.log10(rows[0].px)) - sigs[j] + 1);
+      for (const r of rows) {
+        // Bid buckets run up from their price, ask buckets down to theirs. Only the part past the finer book is new.
+        const [lo, hi] = bid ? [r.px, Math.min(r.px + step, reach)] : [Math.max(r.px - step, reach), r.px];
+        if (hi > lo) segs.push({ lo, hi, usd: (r.usd * (hi - lo)) / step });
+      }
+      reach = bid ? Math.min(reach, ...rows.map((r) => r.px)) : Math.max(reach, ...rows.map((r) => r.px));
+    });
+    return { segs, reach };
+  });
+  return { venue: "Hyperliquid", bids: sides[0].segs, asks: sides[1].segs, bidReach: sides[0].reach, askReach: sides[1].reach };
+}
+
+export const deepBooks = (sym: string) =>
+  cached(`deep:${sym}`, 5e3, async () => {
+    const out: DeepBook[] = [];
+    const num = (r: [string, string][]) => r.map(([p, q]) => [+p, +q] as [number, number]);
+    const exact = (venue: string, bids: [number, number][], asks: [number, number][]) => {
+      if (!bids.length || !asks.length) return;
+      out.push({
+        venue,
+        bids: bids.map(([p, q]) => ({ lo: p, hi: p, usd: p * q })),
+        asks: asks.map(([p, q]) => ({ lo: p, hi: p, usd: p * q })),
+        bidReach: Math.min(...bids.map((b) => b[0])),
+        askReach: Math.max(...asks.map((a) => a[0])),
+      });
+    };
+    const k = spotName(sym) === sym ? 1 : 1000; // 1000PEPE perps quote 1,000 tokens, spot quotes one
+    type Depth = { bids: [string, string][]; asks: [string, string][] };
+    await Promise.allSettled([
+      json<Depth>(`${FAPI}/fapi/v1/depth?symbol=${sym}USDT&limit=1000`).then((d) => exact("Binance perp", num(d.bids), num(d.asks))),
+      json<{ result: { b: [string, string][]; a: [string, string][] } }>(`${BYBIT}/v5/market/orderbook?category=linear&symbol=${sym}USDT&limit=500`).then((d) => {
+        if (d.result?.b) exact("Bybit", num(d.result.b), num(d.result.a));
+      }),
+      cached(`spotdepth:${sym}`, 10e3, () => json<Depth>(`${SPOT}/api/v3/depth?symbol=${spotName(sym)}USDT&limit=5000`)).then((d) =>
+        exact("Binance spot", num(d.bids).map(([p, q]) => [p * k, q / k]), num(d.asks).map(([p, q]) => [p * k, q / k])),
+      ),
+      hlLadder(hlName(sym)).then((b) => {
+        if (b) out.push(b);
+      }),
+    ]);
+    return out;
+  });
+
 export const universe = () =>
   cached("uni", 10e3, async () => {
     const [tick, prem, info, hours] = await Promise.all([
