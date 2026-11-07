@@ -25,6 +25,23 @@ export function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>): Pro
   return p;
 }
 
+// Like cached, but when a refresh fails it serves the last good value for up to maxAgeMs, so a brief rate limit
+// upstream does not take the page down.
+const good = new Map<string, { at: number; v: unknown }>();
+export function cachedSticky<T>(key: string, ttlMs: number, fn: () => Promise<T>, maxAgeMs = 10 * 60e3): Promise<T> {
+  return cached(key, ttlMs, async () => {
+    try {
+      const v = await fn();
+      good.set(key, { at: Date.now(), v });
+      return v;
+    } catch (e) {
+      const g = good.get(key);
+      if (g && Date.now() - g.at < maxAgeMs) return g.v as T;
+      throw e;
+    }
+  });
+}
+
 async function json<T = unknown>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, { ...init, signal: AbortSignal.timeout(12000), cache: "no-store" });
   if (!r.ok) throw new Error(`${r.status} ${url}`);
@@ -157,7 +174,7 @@ export type DeepBook = { venue: string; bids: BookSeg[]; asks: BookSeg[]; bidRea
 type HlLevel = { px: string; sz: string };
 
 // Hyperliquid shows 20 levels per side, so finer books cover near price and coarser grouped books extend the reach.
-async function hlLadder(coin: string): Promise<DeepBook | null> {
+export async function hlLadder(coin: string): Promise<DeepBook | null> {
   const sigs = [0, 4, 3, 2];
   const books = await Promise.all(sigs.map((n) => hl<{ levels: HlLevel[][] }>(n ? { type: "l2Book", coin, nSigFigs: n } : { type: "l2Book", coin }).catch(() => null)));
   if (!books[0]?.levels) return null;

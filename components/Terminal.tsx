@@ -8,10 +8,10 @@ import { wickText, type WickRead } from "@/lib/wicks.ts";
 import type { FppRead } from "@/lib/fpp.ts";
 import type { Analysis, Book, Forecast, Frame, NewsItem, NewsResp, ScreenerRow, UniverseCoin } from "@/lib/types.ts";
 import { fmtPct, fmtPx, fmtUsd, pxDigits, setActiveSym, setPriceDigits, toneClass } from "@/lib/format.ts";
+import { DEFAULT_LIST } from "@/lib/coins.ts";
 
 const Chart = dynamic(() => import("./Chart"), { ssr: false });
 
-const DEFAULT_LIST = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "NEAR", "ENA", "LIT", "DOGE", "SUI", "LINK", "1000PEPE", "AERO", "VVV", "UNI", "ZRO"];
 // Applied once to watchlists saved earlier, so a later manual add or remove sticks.
 const LIST_CHANGES = ["+1000PEPE", "+AERO", "+VVV", "+UNI", "-AVAX", "-XRP", "-BNB", "+ZRO"];
 const TABS = ["CHART", "ZONES", "TPO", "ABSORB", "SCAN", "NEWS", "CONTEXT"] as const;
@@ -616,6 +616,7 @@ export default function Terminal() {
         <span className="price">{price ? fmtPx(price) : "—"}</span>
         <span className={toneClass(chg)}>{fmtPct(chg)}</span>
         {a?.ta.frames.map((f) => <span key={f.tf} className="kv"><span className="hide-m">{f.tf} </span><b className={trendTone(f.trend)}>{arrow(f.trend)}</b></span>)}
+        <a className="hm-link" href={`/hyper?sym=${sym}`}>HYPERMODE</a>
         <span className="status">{err ? "DATA ERROR" : a ? new Date(a.asOf).toLocaleTimeString("en-GB") : "LOADING"}</span>
       </header>
 

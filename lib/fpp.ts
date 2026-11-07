@@ -47,14 +47,61 @@ export type FppRead = {
   dir: 1 | -1;
   prob: number; // share of similar past moments that went the predicted way, shrunk toward even odds
   atrPct: number; // today's ATR as a share of price, to turn the paths below back into prices
+  base: number; // the last closed price the paths start from
   median: number[]; // consensus path per step, log move in ATRs
+  q10: number[];
   q25: number[];
   q75: number[];
+  q90: number[];
+  // How far price reached by each step: the highest high and lowest low so far. 50 is the typical reach, 80 the
+  // reach that only one in five similar moments went beyond.
+  reach: { hi50: number[]; hi80: number[]; lo50: number[]; lo80: number[] };
+  touch: { px: number; p: number }[]; // chance each requested level trades within the horizon
+  race: { up: number; dn: number; pUp: number; pDn: number; pNone: number } | null; // which of two levels trades first
+  sim?: FppSim; // only with opts.keep
   candles: FppCandle[];
   agree: boolean; // whether the linear model points the same way
   drivers: { name: string; push: number }[]; // what moved the linear model's estimate, signed toward up
-  test: { n: number; hit: number; base: number; avg: number; edge: boolean };
+  // Replay: direction hit rate against the baseline, and how often the closing price landed inside the 50% and 80% bands.
+  test: { n: number; hit: number; base: number; avg: number; edge: boolean; cover50: number; cover80: number };
 };
+// keep: also return each neighbour's candle highs and lows, so callers can price any level themselves.
+export type FppOpts = { levels?: number[]; race?: [number, number]; keep?: boolean };
+// Each similar past moment's path: candle highs and lows as log moves from its start, in its own ATRs, and its weight.
+export type FppSim = { w: number; hi: number[]; lo: number[] }[];
+
+// Weighted share of similar moments whose path traded a level within the first `steps` candles.
+// d is the level's distance from the start in ATRs: positive above, negative below.
+export function touchP(sim: FppSim, d: number, steps = Infinity) {
+  let [hit, all] = [0, 0];
+  for (const s of sim) {
+    all += s.w;
+    const n = Math.min(steps, s.hi.length);
+    for (let k = 0; k < n; k++)
+      if (d >= 0 ? s.hi[k] >= d : s.lo[k] <= d) {
+        hit += s.w;
+        break;
+      }
+  }
+  return all ? hit / all : 0;
+}
+
+// Which of two levels trades first: du above the start, dd below. Both inside one candle counts half each way.
+export function raceP(sim: FppSim, du: number, dd: number, steps = Infinity) {
+  let [up, dn, all] = [0, 0, 0];
+  for (const s of sim) {
+    all += s.w;
+    const n = Math.min(steps, s.hi.length);
+    for (let k = 0; k < n; k++) {
+      const [u, l] = [s.hi[k] >= du, s.lo[k] <= dd];
+      if (!u && !l) continue;
+      up += s.w * (u ? (l ? 0.5 : 1) : 0);
+      dn += s.w * (l ? (u ? 0.5 : 1) : 0);
+      break;
+    }
+  }
+  return all ? { pUp: up / all, pDn: dn / all, pNone: 1 - (up + dn) / all } : { pUp: 0, pDn: 0, pNone: 1 };
+}
 
 const median = (xs: number[], ws: number[], q = 0.5) => {
   const idx = xs.map((x, i) => i).sort((a, b) => xs[a] - xs[b]);
@@ -90,7 +137,7 @@ function ridge(X: number[][], y: number[], lambda: number) {
   return A.map((row, r) => (row[r] ? row[f] / row[r] : 0));
 }
 
-export function readFpp(sym: string, tf: string, all: Bar[], daily: Bar[], btc: Bar[]): FppRead {
+export function readFpp(sym: string, tf: string, all: Bar[], daily: Bar[], btc: Bar[], opts: FppOpts = {}): FppRead {
   const H = FPP_SETUP[tf].horizon;
   const bars = all.slice(0, -1); // the forming candle is left out
   const b = colsFromBars(bars);
@@ -238,9 +285,37 @@ export function readFpp(sym: string, tf: string, all: Bar[], daily: Bar[], btc: 
   const train = Array.from({ length: live.end - warm }, (_, k) => warm + k);
   const dir: 1 | -1 = live.pUp >= 0.5 ? 1 : -1;
   const paths = live.near.map((x) => path(x.j));
-  const med = Array.from({ length: H }, (_, k) => median(paths.map((p) => p[k]), live.wts));
-  const q25 = Array.from({ length: H }, (_, k) => median(paths.map((p) => p[k]), live.wts, 0.25));
-  const q75 = Array.from({ length: H }, (_, k) => median(paths.map((p) => p[k]), live.wts, 0.75));
+  const band = (q: number) => Array.from({ length: H }, (_, k) => median(paths.map((p) => p[k]), live.wts, q));
+  const med = band(0.5);
+  const [q10, q25, q75, q90] = [band(0.1), band(0.25), band(0.75), band(0.9)];
+
+  // Running highest high and lowest low of each neighbour's path, in its own ATRs.
+  const ext = live.near.map(({ j }) => {
+    const hi: number[] = [];
+    const lo: number[] = [];
+    let [mh, ml] = [-Infinity, Infinity];
+    for (let k = 0; k < H; k++) {
+      mh = Math.max(mh, (Math.log(b.h[j + k + 1]) - lc[j]) / atrPct[j]);
+      ml = Math.min(ml, (Math.log(b.l[j + k + 1]) - lc[j]) / atrPct[j]);
+      hi.push(mh);
+      lo.push(ml);
+    }
+    return { hi, lo };
+  });
+  const reachQ = (side: "hi" | "lo", q: number) => Array.from({ length: H }, (_, k) => median(ext.map((e) => e[side][k]), live.wts, q));
+  const reach = { hi50: reachQ("hi", 0.5), hi80: reachQ("hi", 0.8), lo50: reachQ("lo", 0.5), lo80: reachQ("lo", 0.2) };
+  const sim: FppSim = live.near.map(({ j }, k) => ({
+    w: live.wts[k],
+    hi: Array.from({ length: H }, (_, s) => (Math.log(b.h[j + s + 1]) - lc[j]) / atrPct[j]),
+    lo: Array.from({ length: H }, (_, s) => (Math.log(b.l[j + s + 1]) - lc[j]) / atrPct[j]),
+  }));
+  const atrUnits = (px: number) => (Math.log(px) - lc[now]) / atrPct[now];
+  const touch = (opts.levels ?? []).map((px) => ({ px, p: touchP(sim, atrUnits(px)) }));
+  let race: FppRead["race"] = null;
+  if (opts.race) {
+    const [up, dn] = opts.race[0] > opts.race[1] ? opts.race : [opts.race[1], opts.race[0]];
+    race = { up, dn, ...raceP(sim, atrUnits(up), atrUnits(dn)) };
+  }
   // The drawn path is the real past path closest to the consensus, among those that went the predicted way.
   let best = -1;
   let bestErr = Infinity;
@@ -265,7 +340,7 @@ export function readFpp(sym: string, tf: string, all: Bar[], daily: Bar[], btc: 
   // Honest replay: predict at past points with only earlier data, and score against what happened.
   const step = Math.max(1, Math.round(H / 2));
   const start = Math.max(warm + 200, Math.floor(warm + 0.6 * (now - H - warm)));
-  let [hits, ups, follow, tests] = [0, 0, 0, 0];
+  let [hits, ups, follow, tests, in50, in80] = [0, 0, 0, 0, 0, 0];
   for (let i = start; i + H <= now; i += step) {
     const r = knn(i);
     const call = r.pUp >= 0.5 ? 1 : -1;
@@ -274,6 +349,11 @@ export function readFpp(sym: string, tf: string, all: Bar[], daily: Bar[], btc: 
     if (out > 0) ups++;
     if (Math.sign(out) === call) hits++;
     follow += call * out;
+    const finals = r.near.map((x) => (lc[x.j + H] - lc[x.j]) / atrPct[x.j]);
+    const real = out / atrPct[i];
+    const q = (p: number) => median(finals, r.wts, p);
+    if (real >= q(0.25) && real <= q(0.75)) in50++;
+    if (real >= q(0.1) && real <= q(0.9)) in80++;
   }
   const hit = tests ? hits / tests : 0;
   const base = tests ? Math.max(ups / tests, 1 - ups / tests) : 0.5;
@@ -290,12 +370,27 @@ export function readFpp(sym: string, tf: string, all: Bar[], daily: Bar[], btc: 
     dir,
     prob: dir > 0 ? live.pUp : 1 - live.pUp,
     atrPct: atrPct[now],
+    base: b.c[now],
     median: med,
+    q10,
     q25,
     q75,
+    q90,
+    reach,
+    touch,
+    race,
+    ...(opts.keep ? { sim } : {}),
     candles,
     agree: Math.sign(linear) === dir,
     drivers,
-    test: { n: tests, hit, base, avg: tests ? (follow / tests) * 100 : 0, edge: tests >= 30 && hit >= base + 0.03 && zScore >= 1.65 },
+    test: {
+      n: tests,
+      hit,
+      base,
+      avg: tests ? (follow / tests) * 100 : 0,
+      edge: tests >= 30 && hit >= base + 0.03 && zScore >= 1.65,
+      cover50: tests ? in50 / tests : 0,
+      cover80: tests ? in80 / tests : 0,
+    },
   };
 }
