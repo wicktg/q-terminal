@@ -83,7 +83,10 @@ function WickPanel({ w }: { w: WickRead }) {
 }
 
 function ElliottPanel({ e }: { e: EwView }) {
-  const p = e.primary;
+  const chain = e.chain;
+  const p = chain.length ? chain[chain.length - 1].count : e.primary;
+  const drawnTf = chain.length ? chain[chain.length - 1].tf : e.tf;
+  const ownDiffers = chain.length > 0 && e.primary && e.primary.key !== p?.key;
   const s = e.stats;
   const done = s.hit + s.miss;
   const rate = done ? s.hit / done : 0;
@@ -91,7 +94,19 @@ function ElliottPanel({ e }: { e: EwView }) {
   const pc = (x: number) => `${Math.round(x * 100)}%`;
   return (
     <>
-      <div className="h">ELLIOTT WAVE<span>{e.tf.toUpperCase()}{p ? ` · ${p.degree} degree, ${p.size} ATR swings` : ""}</span></div>
+      <div className="h">ELLIOTT WAVE<span>{chain.length ? "top-down" : e.tf.toUpperCase()}{p ? ` · ${p.size} ATR swings` : ""}</span></div>
+      {chain.length > 0 && (
+        <div className="ew-chain">
+          {chain.map((l, i) => (
+            <div key={l.tf} className={i === chain.length - 1 ? "main" : i === chain.length - 2 ? "parent" : ""} style={{ paddingLeft: 10 + i * 10 }}>
+              <b>{l.tf.toUpperCase()}</b>
+              <span>{i ? "└ " : ""}{l.count.title}</span>
+              <em>toward {fmtPx(l.count.targets[0].price)} · wrong beyond {fmtPx(l.count.invalid.price)}</em>
+            </div>
+          ))}
+          {drawnTf !== e.tf && <div className="note">{e.tf.toUpperCase()} swings do not form a valid count inside the {drawnTf.toUpperCase()} wave right now, so the {drawnTf.toUpperCase()} count is drawn.</div>}
+        </div>
+      )}
       {p ? (
         <>
           <div className="ew-call">
@@ -113,7 +128,13 @@ function ElliottPanel({ e }: { e: EwView }) {
               <li key={c.text} className={c.ok ? "ok" : "no"}><i>{c.ok ? "✓" : "✗"}</i>{c.text}</li>
             ))}
           </ul>
-          {e.alternate && (
+          {ownDiffers && e.primary && (
+            <div className="ew-alt">
+              <i>{e.tf.toUpperCase()} ON ITS OWN</i>
+              {e.primary.title}, quality {e.primary.score}. Not used: it does not fit inside the higher-timeframe wave.
+            </div>
+          )}
+          {!chain.length && e.alternate && (
             <div className="ew-alt">
               <i>ALTERNATE</i>
               {e.alternate.title}, {e.alternate.degree} degree, quality {e.alternate.score}: toward {fmtPx(e.alternate.targets[0].price)}, wrong beyond {fmtPx(e.alternate.invalid.price)}.
@@ -131,14 +152,14 @@ function ElliottPanel({ e }: { e: EwView }) {
       <div className={`pv ${edge ? "up" : ""}`}>
         {s.n ? (
           <>
-            Replay on these candles: {s.n} counts. {pc(rate)} of the {done} that finished proved right before their invalidation (the first target traded, or for waves 2 and 4 the next wave cleared the prior wave&apos;s end), against {pc(s.base)} for a coin toss with the same distances.
+            Replay of {e.tf.toUpperCase()}&apos;s own counts: {s.n}. {pc(rate)} of the {done} that finished proved right before their invalidation (the first target traded, or for waves 2 and 4 the next wave cleared the prior wave&apos;s end), against {pc(s.base)} for a coin toss with the same distances.
             {edge ? " Better than chance on this coin and timeframe, but small samples fade." : " No proven edge here, so read the count as a map, not a signal."}
           </>
         ) : (
           "No counts to replay on these candles yet."
         )}
       </div>
-      <div className="note">Swings come from a zigzag at 2.5, 4 and 6.5 ATR. Every possible position (waves 3, 4, 5, or A, B, C after a finished impulse) must pass the three hard rules: wave 2 never retraces all of wave 1, wave 3 is never the shortest, wave 4 never enters wave 1&apos;s range. Counts that pass are scored on the Fibonacci guidelines, alternation, Elliott Wave Oscillator momentum and whether the count starts from a real extreme. Counts change as new swings confirm. Open interest, funding, liquidations and long/short ratios are not used.</div>
+      <div className="note">Top-down: the highest timeframe with a good count (quality 60+) sets the frame, and each lower timeframe may only count the smaller waves inside the higher wave in progress, starting where it started; the chart draws its own level in amber and the one above in blue. Swings come from a zigzag at 2.5, 4 and 6.5 ATR, and from the start of the higher wave at a range of sizes. Every possible position (waves 3, 4, 5, or A, B, C after a finished impulse) must pass the three hard rules: wave 2 never retraces all of wave 1, wave 3 is never the shortest, wave 4 never enters wave 1&apos;s range. Counts that pass are scored on the Fibonacci guidelines, alternation, Elliott Wave Oscillator momentum and whether the count starts from a real extreme. Counts change as new swings confirm. Open interest, funding, liquidations and long/short ratios are not used.</div>
     </>
   );
 }

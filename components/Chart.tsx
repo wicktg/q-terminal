@@ -27,7 +27,7 @@ import { clock, closesIn } from "./CloseTimers.tsx";
 import ZoneCard, { type CardZone } from "./ZoneCard.tsx";
 import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
 import { wickTag, wickText, type WickEvent, type WickRead } from "@/lib/wicks.ts";
-import { readElliott, type EwLevel, type EwPoint, type EwRead } from "@/lib/elliott.ts";
+import { readElliott, topDown, type EwLevel, type EwLink, type EwPoint, type EwRead } from "@/lib/elliott.ts";
 import { GOKU_HOLD, readGoku, type GokuRead, type GokuView } from "@/lib/goku.ts";
 
 const TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
@@ -72,8 +72,11 @@ type DrawPool = { t: number; price: number };
 type DrawWick = WickEvent & { tag: string; strong: boolean };
 type Pt = { l: number; p: number }; // bar index and price
 type DrawMeasure = { a: Pt; b: Pt; up: boolean; lines: string[] };
-type DrawEw = { pts: EwPoint[]; live: EwPoint; targets: EwLevel[]; invalid: EwLevel; then: EwLevel | null };
-export type EwView = EwRead & { sym: string; tf: string; px: number };
+type DrawEw = { pts: EwPoint[]; live: EwPoint; targets: EwLevel[]; invalid: EwLevel; now: { t: number; price: number }; parent: { pts: EwPoint[]; live: EwPoint; tf: string } | null };
+// chain: the top-down count from the highest timeframe down; the chart draws its last link and the one above it.
+export type EwView = EwRead & { sym: string; tf: string; px: number; chain: EwLink[] };
+// The timeframes above each chart timeframe, highest first, for top-down counting.
+const HIGHER: Record<string, string[]> = { "5m": ["1d", "4h", "1h", "15m"], "15m": ["1d", "4h", "1h"], "1h": ["1d", "4h"], "4h": ["1d"], "1d": [] };
 type Draw = {
   ribbon: { t: number; a: number; b: number }[];
   wicks: DrawWick[];
@@ -159,10 +162,64 @@ class Overlay implements ISeriesPrimitive<Time> {
     const e = this.d.ew;
     if (!p || !e) return;
     const tsc = p.chart.timeScale();
-    const X = (t: number) => tsc.timeToCoordinate(ts(t));
+    const times = this.d.times;
+    const X = (t: number) => {
+      const x = tsc.timeToCoordinate(ts(t));
+      if (x !== null || !times.length) return x;
+      // Off the loaded candles, or between them: snap to the nearest loaded candle.
+      let [lo, hi] = [0, times.length - 1];
+      while (lo < hi) {
+        const m = (lo + hi) >> 1;
+        if (times[m] < t) lo = m + 1;
+        else hi = m;
+      }
+      return tsc.timeToCoordinate(ts(times[lo]));
+    };
     const Y = (v: number) => p.series.priceToCoordinate(v);
     const AMBER = "#f5a623";
+    const BLUE = "#6ea8ff";
     target.useBitmapCoordinateSpace(({ context: c, horizontalPixelRatio: hr, verticalPixelRatio: vr, bitmapSize }) => {
+      // The higher-degree count this one sits inside, in blue under it, labelled with its timeframe.
+      if (e.parent) {
+        const pn = [...e.parent.pts, e.parent.live].map((q) => ({ q, x: X(q.t), y: Y(q.price) }));
+        c.lineWidth = 2.2 * hr;
+        c.strokeStyle = "rgba(110,168,255,0.55)";
+        for (let i = 1; i < pn.length; i++) {
+          const [u, v] = [pn[i - 1], pn[i]];
+          if (u.x === null || u.y === null || v.x === null || v.y === null) continue;
+          c.setLineDash(i === pn.length - 1 ? [6 * hr, 4 * hr] : []);
+          c.beginPath();
+          c.moveTo(u.x * hr, u.y * vr);
+          c.lineTo(v.x * hr, v.y * vr);
+          c.stroke();
+        }
+        c.setLineDash([]);
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        pn.forEach((n, i) => {
+          if (n.x === null || n.y === null || !n.q.label) return;
+          const live = i === pn.length - 1;
+          const [cx, cy] = [n.x * hr, (n.y + (n.q.high ? -30 : 30)) * vr];
+          c.font = `600 ${11 * vr}px monospace`;
+          const tag = `(${n.q.label})`;
+          const w = c.measureText(tag).width + 8 * hr;
+          c.fillStyle = live ? "rgba(0,0,0,0.85)" : "rgba(110,168,255,0.9)";
+          c.fillRect(cx - w / 2, cy - 8 * vr, w, 16 * vr);
+          if (live) {
+            c.strokeStyle = BLUE;
+            c.lineWidth = hr;
+            c.strokeRect(cx - w / 2, cy - 8 * vr, w, 16 * vr);
+          }
+          c.fillStyle = live ? BLUE : "#000";
+          c.fillText(tag, cx, cy + 0.5 * vr);
+          if (live) {
+            c.font = `${9 * vr}px monospace`;
+            c.fillStyle = BLUE;
+            c.fillText(e.parent!.tf.toUpperCase(), cx, cy + (n.q.high ? -14 : 14) * vr);
+          }
+        });
+        c.textAlign = "left";
+      }
       const nodes = [...e.pts, e.live].map((q) => ({ q, x: X(q.t), y: Y(q.price) }));
       const last = nodes.length - 1;
       c.lineWidth = 1.6 * hr;
@@ -235,17 +292,17 @@ class Overlay implements ISeriesPrimitive<Time> {
       };
       e.targets.slice(0, 3).forEach((t, i) => level(t.price, i === 0 ? "#2bbf85" : "rgba(43,191,133,0.6)", `T${i + 1} ${fmtPx(t.price)} · ${t.label}`, [6 * hr, 4 * hr]));
       level(e.invalid.price, "#e5534b", `INVALID ${fmtPx(e.invalid.price)}`, [2 * hr, 3 * hr]);
+      // Projection from the current candle to the first target.
       const yT = Y(e.targets[0].price);
-      if (lv.x !== null && lv.y !== null && yT !== null) {
-        const step = tsc.options().barSpacing * 10;
+      const xn = X(e.now.t);
+      const yn = Y(e.now.price);
+      if (xn !== null && yn !== null && yT !== null) {
         c.strokeStyle = "rgba(245,166,35,0.6)";
         c.lineWidth = 1.2 * hr;
         c.setLineDash([4 * hr, 4 * hr]);
         c.beginPath();
-        c.moveTo(lv.x * hr, lv.y * vr);
-        c.lineTo((lv.x + step) * hr, yT * vr);
-        const yN = e.then ? Y(e.then.price) : null;
-        if (yN !== null) c.lineTo((lv.x + 2 * step) * hr, yN * vr);
+        c.moveTo(xn * hr, yn * vr);
+        c.lineTo((xn + tsc.options().barSpacing * 10) * hr, yT * vr);
         c.stroke();
         c.setLineDash([]);
       }
@@ -838,6 +895,8 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
   const ewCb = useRef(onEw);
   ewCb.current = onEw;
   const ewRead = useRef<EwRead | null>(null);
+  const ewChain = useRef<EwLink[]>([]);
+  const htf = useRef<Record<string, Bar[]>>({}); // higher-timeframe candles for top-down counting
   const wicksCb = useRef(onWicks);
   wicksCb.current = onWicks;
   const gokuCb = useRef(onGoku);
@@ -1139,15 +1198,34 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
   };
 
   // Elliott Wave is recounted when a candle closes (with its replay), and redrawn from that count on ticks.
+  // Top-down: the highest timeframe sets the frame and each lower one counts inside it, ending at this chart.
   const ewDraw = (full: boolean): DrawEw | null => {
     const B = bars.current;
+    const tf = tfRef.current;
     if (full) {
-      ewRead.current = onRef.current.ew && B.length > 200 ? readElliott(B, { closed: B.length - 1 }) : null;
-      const r = ewRead.current;
-      ewCb.current?.(r ? { ...r, sym, tf: tfRef.current, px: B[B.length - 1].c } : null);
+      const own = onRef.current.ew && B.length > 200 ? readElliott(B, { closed: B.length - 1 }) : null;
+      ewRead.current = own;
+      let chain: EwLink[] = [];
+      if (own) {
+        const levels = (HIGHER[tf] ?? [])
+          .filter((t) => (htf.current[t]?.length ?? 0) > 120)
+          .map((t) => {
+            const hb = htf.current[t];
+            return { tf: t, sec: TF_SEC[t as (typeof TFS)[number]], bars: hb, read: readElliott(hb, { closed: hb.length - 1, replay: false }) };
+          });
+        chain = levels.length ? topDown([...levels, { tf, sec: TF_SEC[tf as (typeof TFS)[number]], bars: B, read: own }]) : [];
+        if (chain.length && chain[0].tf === tf) chain = []; // no higher frame found, so this timeframe stands alone
+      }
+      ewChain.current = chain;
+      ewCb.current?.(own ? { ...own, sym, tf, px: B[B.length - 1].c, chain } : null);
     }
-    const c = onRef.current.ew ? ewRead.current?.primary : null;
-    return c ? { pts: c.points, live: c.live, targets: c.targets, invalid: c.invalid, then: c.then } : null;
+    if (!onRef.current.ew) return null;
+    const chain = ewChain.current;
+    const main = chain.length ? chain[chain.length - 1].count : ewRead.current?.primary;
+    const up = chain.length > 1 ? chain[chain.length - 2] : null;
+    if (!main) return null;
+    const last = B[B.length - 1];
+    return { pts: main.points, live: main.live, targets: main.targets, invalid: main.invalid, now: { t: last.t, price: last.c }, parent: up ? { pts: up.count.points, live: up.count.live, tf: up.tf } : null };
   };
 
   // GOKU lines on every tick; dots, tags, signals, levels and the side panel when a candle closes.
@@ -1496,6 +1574,30 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
     paint(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [on]);
+
+  // Higher-timeframe candles for top-down Elliott counting, refreshed each minute while ELLIOTT is on.
+  useEffect(() => {
+    htf.current = {};
+    ewChain.current = [];
+    const need = HIGHER[tf] ?? [];
+    if (!on.ew || !need.length) return;
+    let dead = false;
+    const load = async () => {
+      const got = await Promise.all(need.map((t) => fetch(`/api/klines?sym=${sym}&tf=${t}&limit=1000`).then((r) => r.json() as Promise<KlinesResp>).catch(() => null)));
+      if (dead) return;
+      got.forEach((r, i) => {
+        if (r?.bars?.length) htf.current[need[i]] = r.bars;
+      });
+      paint(true);
+    };
+    void load();
+    const id = setInterval(load, 60000);
+    return () => {
+      dead = true;
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [on.ew, sym, tf]);
 
   // Wick flow and sweeps for this coin and timeframe, refreshed while the toggle is on.
   useEffect(() => {

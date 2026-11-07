@@ -24,7 +24,7 @@ export type EwCount = {
   kind: EwKind;
   dir: 1 | -1; // the direction of the impulse this count belongs to
   next: 1 | -1; // the direction of the wave in progress
-  degree: (typeof DEGREE)[number];
+  degree: string;
   size: number;
   title: string;
   score: number;
@@ -40,7 +40,7 @@ export type EwCount = {
   key: string; // identity of the count, for the replay
 };
 export type EwStats = { n: number; hit: number; miss: number; open: number; base: number };
-export type EwRead = { primary: EwCount | null; alternate: EwCount | null; ewo: number; ewoPct: number; stats: EwStats };
+export type EwRead = { primary: EwCount | null; alternate: EwCount | null; all: EwCount[]; ewo: number; ewoPct: number; stats: EwStats };
 
 const sma = (x: number[], n: number) => {
   const out = new Array<number>(x.length).fill(NaN);
@@ -111,7 +111,7 @@ function zigzag(B: Bar[], atr: number[], k: number) {
   return { piv, count, live };
 }
 
-type Ctx = { B: Bar[]; ewo: number[]; size: number; degree: (typeof DEGREE)[number] };
+type Ctx = { B: Bar[]; ewo: number[]; size: number; degree: string };
 
 // The strongest oscillator reading along a leg, in the leg's direction.
 const legEwo = (ewo: number[], a: number, b: number, d: number) => {
@@ -395,7 +395,7 @@ function best(all: EwCount[]) {
   const sorted = [...all].sort((a, b) => b.score - a.score);
   const primary = sorted[0] && sorted[0].score >= 40 ? sorted[0] : null;
   const alternate = primary ? (sorted.find((c) => c.next !== primary.next && c.score >= 35) ?? null) : null;
-  return { primary, alternate };
+  return { primary, alternate, sorted };
 }
 
 export function readElliott(B: Bar[], opts: { closed?: number; replay?: boolean } = {}): EwRead {
@@ -454,8 +454,85 @@ export function readElliott(B: Bar[], opts: { closed?: number; replay?: boolean 
   return {
     primary: now.primary,
     alternate: now.alternate,
+    all: now.sorted,
     ewo: ewo[j],
     ewoPct: (ewo[j] / B[j].c) * 100,
     stats: { n: calls, hit, miss, open, base: calls ? base / calls : 0 },
   };
+}
+
+// Top-down counting, as Elliott analysts work: the largest degree sets the frame, and each lower timeframe may only
+// count the smaller waves inside the higher wave now in progress. An impulsive wave (3, 5, C, and A of a zigzag)
+// divides into five waves its own way; a corrective wave (2, 4, B) into three against the trend, or five for the A of
+// a zigzag. A lower count fits only if it starts where the higher wave started, at the same price.
+const IMPULSE = new Set<EwKind>(["2", "3", "4", "5"]);
+export function nestsIn(child: EwCount, parent: EwCount, childSec: number, parentSec: number) {
+  const start = parent.points[parent.points.length - 1];
+  const o = child.points[0];
+  if (!start || !o) return false;
+  if (o.t < start.t - 2 * childSec || o.t > start.t + parentSec) return false;
+  if (Math.abs(o.price / start.price - 1) > 0.005) return false;
+  const five = IMPULSE.has(child.kind) && child.dir === parent.next;
+  const three = !IMPULSE.has(child.kind) && -child.dir === parent.next;
+  if (parent.kind === "3" || parent.kind === "5" || parent.kind === "C") return five;
+  return five || three; // 2, 4, B, and A, which can be a five or a three
+}
+
+// Counts on a lower timeframe that start exactly where a higher wave started. The zigzag runs from that turning point
+// at a range of swing sizes, so the swings since it can line up as a five or a three, the way an analyst subdivides
+// a wave instead of counting the latest swings alone.
+const ANCHOR_SIZES = [2, 2.5, 3, 4, 5, 6.5, 8, 10, 13];
+export function anchoredCounts(B: Bar[], start: { t: number; price: number; high: boolean }, sec: number, parentSec: number): EwCount[] {
+  let ia = -1;
+  for (let i = 0; i < B.length; i++) {
+    if (B[i].t < start.t - 2 * sec || B[i].t > start.t + parentSec) continue;
+    if (Math.abs((start.high ? B[i].h : B[i].l) / start.price - 1) < 1e-6) {
+      ia = i;
+      break;
+    }
+  }
+  if (ia < 0 || B.length - ia < 8) return [];
+  const S = B.slice(ia);
+  const mid = B.map((b) => (b.h + b.l) / 2);
+  const f5 = sma(mid, 5);
+  const f35 = sma(mid, 35);
+  const ewo = mid.map((_, i) => f5[i] - f35[i]).slice(ia);
+  const atr = atrOf(B).slice(ia);
+  const out: EwCount[] = [];
+  for (const k of ANCHOR_SIZES) {
+    const z = zigzag(S, atr, k);
+    if (!z.piv.length || z.piv[0].i !== 0) continue; // the turning point itself must be the first swing
+    const last = S.length - 1;
+    const ctx = { B: S, ewo, size: k, degree: "nested" };
+    for (const c of [...countsAt(z.piv, z.live[last], S[last].c, ctx), ...simpleCounts(z.piv, z.live[last], S[last].c, ctx)])
+      if (c.points[0].t === S[0].t) out.push({ ...c, key: `a${c.key}` });
+  }
+  return out;
+}
+
+export type EwLink = { tf: string; count: EwCount };
+// levels run from the highest timeframe down to the chart's. The frame is the largest count of good quality (60+)
+// on the highest timeframe that has one; each level below adds its best count that fits inside the one above,
+// from its own counts and from counts anchored at the start of the higher wave.
+export function topDown(levels: { tf: string; sec: number; bars: Bar[]; read: EwRead }[]): EwLink[] {
+  const chain: EwLink[] = [];
+  let sec = 0;
+  for (const lv of levels) {
+    if (!chain.length) {
+      const good = lv.read.all.filter((c) => c.score >= 60);
+      if (!good.length) continue;
+      const span = (c: EwCount) => c.live.t - c.points[0].t;
+      chain.push({ tf: lv.tf, count: good.reduce((a, b) => (span(b) > span(a) || (span(b) === span(a) && b.score > a.score) ? b : a)) });
+      sec = lv.sec;
+      continue;
+    }
+    const parent = chain[chain.length - 1].count;
+    const start = parent.points[parent.points.length - 1];
+    const pool = [...lv.read.all, ...anchoredCounts(lv.bars, start, lv.sec, sec)];
+    const kid = pool.filter((c) => nestsIn(c, parent, lv.sec, sec)).sort((a, b) => b.score - a.score)[0];
+    if (!kid) break;
+    chain.push({ tf: lv.tf, count: kid });
+    sec = lv.sec;
+  }
+  return chain;
 }

@@ -327,3 +327,12 @@ a.amber, a.dim { text-decoration: none; }
 @media (max-width: 1000px) {
   .topbar .closes { display: none; }
 }
+.ew-chain { border-bottom: 1px solid #141414; padding: 4px 0 6px; }
+.ew-chain > div { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 0 6px; padding: 3px 10px; font-size: 11px; line-height: 1.45; }
+.ew-chain b { font-weight: 500; color: var(--dim); }
+.ew-chain span { color: #cfcfcf; }
+.ew-chain em { grid-column: 2; font-style: normal; color: var(--faint); font-size: 10.5px; }
+.ew-chain .main b, .ew-chain .main span { color: var(--amber); }
+.ew-chain .parent b, .ew-chain .parent span { color: #6ea8ff; }
+.ew-chain .note { display: block; padding: 4px 10px 0; }
+
