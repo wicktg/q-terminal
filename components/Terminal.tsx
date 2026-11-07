@@ -5,6 +5,7 @@ import AbsorbTab from "./AbsorbTab.tsx";
 import TpoTab from "./TpoTab.tsx";
 import { useJson } from "./use-json.ts";
 import { wickText, type WickRead } from "@/lib/wicks.ts";
+import type { FppRead } from "@/lib/fpp.ts";
 import type { Analysis, Book, Forecast, Frame, NewsItem, NewsResp, ScreenerRow, UniverseCoin } from "@/lib/types.ts";
 import { fmtPct, fmtPx, fmtUsd, pxDigits, setActiveSym, setPriceDigits, toneClass } from "@/lib/format.ts";
 
@@ -79,7 +80,45 @@ function WickPanel({ w }: { w: WickRead }) {
   );
 }
 
-function StructurePanel({ a, price, wicks }: { a: Analysis | null; price: number; wicks?: WickRead | null }) {
+const TF_HOURS: Record<string, number> = { "5m": 1 / 12, "15m": 0.25, "1h": 1, "4h": 4, "1d": 24 };
+const span = (h: number) => (h >= 48 ? `${Math.round(h / 24)} days` : h >= 24 ? "1 day" : `${Math.round(h)}h`);
+
+function FppPanel({ f }: { f: FppRead }) {
+  const end = (v: number) => (Math.exp(v * f.atrPct) - 1) * 100;
+  const pc = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`;
+  const up = f.dir > 0;
+  const t = f.test;
+  return (
+    <>
+      <div className="h">FPP · FUTURE PRICE PREDICTION<span>{f.tf.toUpperCase()}, next {f.horizon} candles ({span(f.horizon * TF_HOURS[f.tf])})</span></div>
+      <div className="fpp-call">
+        <b className={up ? "up" : "down"}>{up ? "▲ UP" : "▼ DOWN"}</b>
+        <span><b>{Math.round(f.prob * 100)}%</b> of the {f.neighbors} most similar past moments went this way</span>
+      </div>
+      <table className="stat fpp-stats">
+        <tbody>
+          <tr><td>Median move</td><td>{pc(end(f.median[f.horizon - 1]))}</td></tr>
+          <tr><td>Middle half of outcomes</td><td>{pc(end(f.q25[f.horizon - 1]))} to {pc(end(f.q75[f.horizon - 1]))}</td></tr>
+          <tr><td>Second model</td><td>{f.agree ? "agrees" : "disagrees, so confidence is lower"}</td></tr>
+          <tr><td>History used</td><td>{f.days} days, {f.samples.toLocaleString()} moments</td></tr>
+        </tbody>
+      </table>
+      <div className="fpp-drivers">
+        <i>MAIN DRIVERS</i>
+        {f.drivers.map((d) => (
+          <span key={d.name} className={d.push >= 0 ? "up" : "down"}>{d.push >= 0 ? "↑" : "↓"} {d.name}</span>
+        ))}
+      </div>
+      <div className={`fpp-verdict ${t.edge ? "up" : ""}`}>
+        Replay on this coin: right {Math.round(t.hit * 100)}% of {t.n} times, against {Math.round(t.base * 100)}% for always guessing the more common direction.
+        {t.edge ? " That is better than chance here, but past accuracy can fade." : " No proven edge here, so read the path as a scenario, not a signal."}
+      </div>
+      <div className="note">It compares the latest candle with every past one on momentum, stretch from the 50 EMA, volatility, taker flow, range position, the daily trend, BTC, market structure, time of day and room to liquidity, then follows what happened next. White candles are the real past path closest to that consensus, scaled to today&apos;s volatility. Open interest, funding, liquidations and long/short ratios are left out.</div>
+    </>
+  );
+}
+
+function StructurePanel({ a, price, wicks, fpp }: { a: Analysis | null; price: number; wicks?: WickRead | null; fpp?: FppRead | null }) {
   if (!a) return <Loading />;
   const px = price || a.price;
   const above = a.ta.zones.filter((z) => z.dist > 0).slice(0, 3).reverse();
@@ -102,6 +141,7 @@ function StructurePanel({ a, price, wicks }: { a: Analysis | null; price: number
       {inside.map((z) => <Z key={`${z.tf}${z.kind}${z.top}${z.bottom}`} z={z} />)}
       {below.map((z) => <Z key={`${z.tf}${z.kind}${z.top}${z.bottom}`} z={z} />)}
       {!a.ta.zones.length && <div className="note">No fresh zones within 15% of price.</div>}
+      {fpp && fpp.sym === a.sym && <FppPanel f={fpp} />}
       {wicks && wicks.sym === a.sym && <WickPanel w={wicks} />}
     </>
   );
@@ -456,6 +496,7 @@ export default function Terminal() {
   const [open, setOpen] = useState(false);
   const [live, setLive] = useState<number | null>(null);
   const [wicks, setWicks] = useState<WickRead | null>(null);
+  const [fpp, setFpp] = useState<FppRead | null>(null);
   const [tick, setTick] = useState<Record<string, Tick>>({});
   const tickAt = useRef(0);
   const search = useRef<HTMLInputElement>(null);
@@ -615,8 +656,8 @@ export default function Terminal() {
         <main className={`main ${tab === "CHART" || tab === "TPO" ? "fill" : ""}`}>
           {tab === "CHART" && (
             <>
-              <Chart sym={sym} analysis={a} onPrice={setLive} digits={pxDigits(price || 1, sym)} onWicks={setWicks} />
-              <div className="ctx-inline"><StructurePanel a={a} price={price} wicks={wicks} /></div>
+              <Chart sym={sym} analysis={a} onPrice={setLive} digits={pxDigits(price || 1, sym)} onWicks={setWicks} onFpp={setFpp} />
+              <div className="ctx-inline"><StructurePanel a={a} price={price} wicks={wicks} fpp={fpp} /></div>
             </>
           )}
           {tab === "ZONES" && <Zones sym={sym} a={a} />}
@@ -627,7 +668,7 @@ export default function Terminal() {
           {tab === "CONTEXT" && <ContextTab a={a} sym={sym} />}
         </main>
 
-        <section className="ctx"><StructurePanel a={a} price={price} wicks={wicks} /></section>
+        <section className="ctx"><StructurePanel a={a} price={price} wicks={wicks} fpp={fpp} /></section>
       </div>
 
       <nav className="mob-nav">

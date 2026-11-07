@@ -26,6 +26,7 @@ import { FlowLayer } from "./flow-layer.ts";
 import ZoneCard, { type CardZone } from "./ZoneCard.tsx";
 import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
 import { wickTag, wickText, type WickEvent, type WickRead } from "@/lib/wicks.ts";
+import type { FppRead } from "@/lib/fpp.ts";
 
 const TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
 const TF_SEC: Record<(typeof TFS)[number], number> = { "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
@@ -69,6 +70,7 @@ type DrawPool = { t: number; price: number };
 type DrawWick = WickEvent & { tag: string; strong: boolean };
 type Pt = { l: number; p: number }; // bar index and price
 type DrawMeasure = { a: Pt; b: Pt; up: boolean; lines: string[] };
+type DrawFpp = { start: number; base: number; read: FppRead };
 type Draw = {
   ribbon: { t: number; a: number; b: number }[];
   wicks: DrawWick[];
@@ -76,6 +78,7 @@ type Draw = {
   measure: DrawMeasure | null;
   measureHint: string | null;
   zoneUsd: Record<string, ZoneAmount>; // resting size per zone, keyed top|bottom
+  fpp: DrawFpp | null;
   zones: DrawZone[];
   gaps: DrawZone[];
   swings: DrawSwing[];
@@ -125,7 +128,7 @@ function readChart(B: Bar[], tf: string) {
 
 // Draws what lightweight-charts has no series for: ribbon fill, order blocks, volume profile.
 class Overlay implements ISeriesPrimitive<Time> {
-  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zoneUsd: {}, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
+  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zoneUsd: {}, fpp: null, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
   private p: SeriesAttachedParameter<Time> | null = null;
   attached(p: SeriesAttachedParameter<Time>) {
     this.p = p;
@@ -143,7 +146,87 @@ class Overlay implements ISeriesPrimitive<Time> {
       { zOrder: () => "bottom" as const, renderer: () => ({ draw: (t: never) => this.draw(t) }) },
       { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawWickMarks(t) }) },
       { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawMeasure(t) }) },
+      { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawFpp(t) }) },
     ];
+  }
+  // FPP: the projected path as white candles to the right of the live candle, over a faint band of likely outcomes.
+  private drawFpp(target: { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void }) {
+    const p = this.p;
+    const f = this.d.fpp;
+    if (!p || !f) return;
+    const ts_ = p.chart.timeScale();
+    const r = f.read;
+    const price = (v: number) => f.base * Math.exp(v * r.atrPct);
+    const X = (k: number) => ts_.logicalToCoordinate((f.start + k) as Logical);
+    const Y = (v: number) => p.series.priceToCoordinate(price(v));
+    target.useBitmapCoordinateSpace(({ context: c, horizontalPixelRatio: hr, verticalPixelRatio: vr, bitmapSize }) => {
+      const x0 = X(-1);
+      const y0 = Y(0);
+      if (x0 === null || y0 === null) return;
+      // Band: where the middle half of similar past moments ended up at each step.
+      const top: [number, number][] = [[x0 * hr, y0 * vr]];
+      const bot: [number, number][] = [[x0 * hr, y0 * vr]];
+      for (let k = 0; k < r.horizon; k++) {
+        const x = X(k);
+        const a = Y(r.q75[k]);
+        const b = Y(r.q25[k]);
+        if (x === null || a === null || b === null) continue;
+        top.push([x * hr, a * vr]);
+        bot.push([x * hr, b * vr]);
+      }
+      if (top.length > 1) {
+        c.beginPath();
+        top.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y)));
+        [...bot].reverse().forEach(([x, y]) => c.lineTo(x, y));
+        c.closePath();
+        c.fillStyle = "rgba(255,255,255,0.06)";
+        c.fill();
+      }
+      // Candles: hollow when the projected candle closes up, solid when it closes down.
+      const space = ts_.options().barSpacing * hr;
+      const bw = Math.max(1, Math.min(space * 0.7, 14 * hr));
+      for (let k = 0; k < r.candles.length; k++) {
+        const x = X(k);
+        const q = r.candles[k];
+        const [yo, yh, yl, yc] = [Y(q.o), Y(q.h), Y(q.l), Y(q.c)];
+        if (x === null || yo === null || yh === null || yl === null || yc === null) continue;
+        const cx = x * hr;
+        c.fillStyle = "rgba(255,255,255,0.8)";
+        c.fillRect(cx - 0.5 * hr, yh * vr, hr, Math.max(1, (yl - yh) * vr));
+        const t = Math.min(yo, yc) * vr;
+        const h = Math.max(1, Math.abs(yc - yo) * vr);
+        if (q.c >= q.o) {
+          c.fillStyle = "#000";
+          c.fillRect(cx - bw / 2, t, bw, h);
+          c.strokeStyle = "rgba(255,255,255,0.9)";
+          c.lineWidth = hr;
+          c.strokeRect(cx - bw / 2 + 0.5 * hr, t + 0.5 * vr, bw - hr, Math.max(1, h - vr));
+        } else {
+          c.fillStyle = "rgba(255,255,255,0.85)";
+          c.fillRect(cx - bw / 2, t, bw, h);
+        }
+      }
+      // Label at the end of the path: direction, odds, median move, and whether it has shown an edge here.
+      const xe = X(r.horizon - 1);
+      const ye = Y(r.median[r.horizon - 1]);
+      if (xe === null || ye === null) return;
+      const move = (Math.exp(r.median[r.horizon - 1] * r.atrPct) - 1) * 100;
+      const lines = [`FPP ${r.dir > 0 ? "▲" : "▼"} ${Math.round(r.prob * 100)}%  ${move >= 0 ? "+" : ""}${move.toFixed(2)}%`, r.test.edge ? `edge in replay ${Math.round(r.test.hit * 100)}%` : `no proven edge here`];
+      c.font = `600 ${11 * vr}px monospace`;
+      c.textBaseline = "middle";
+      const w = Math.max(...lines.map((l) => c.measureText(l).width)) + 14 * hr;
+      const lh = 15 * vr;
+      const hh = lines.length * lh + 6 * vr;
+      const lx = Math.min(Math.max(2 * hr, xe * hr - w / 2), bitmapSize.width - w - 2 * hr);
+      const ly = r.dir > 0 ? Math.max(2 * vr, ye * vr - hh - 14 * vr) : Math.min(bitmapSize.height - hh - 2 * vr, ye * vr + 14 * vr);
+      c.fillStyle = "rgba(255,255,255,0.95)";
+      c.fillRect(lx, ly, w, hh);
+      lines.forEach((l, i) => {
+        c.fillStyle = i === 0 ? "#000" : "#555";
+        c.fillText(l, lx + 7 * hr, ly + 3 * vr + lh * i + lh / 2);
+      });
+      c.textBaseline = "alphabetic";
+    });
   }
   // The ruler: a box from start to end with the move in price, percent, bars and time.
   private drawMeasure(target: { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void }) {
@@ -465,9 +548,9 @@ class PaneLabel implements ISeriesPrimitive<Time> {
   }
 }
 
-type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void };
+type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void; onFpp?: (f: FppRead | null) => void };
 
-export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props) {
+export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const legend = useRef<HTMLDivElement>(null);
   const flowCanvas = useRef<HTMLCanvasElement>(null);
@@ -481,7 +564,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
     return (TFS as readonly string[]).includes(t ?? "") ? (t as (typeof TFS)[number]) : "1h";
   });
   const [on, setOn] = useState(() => {
-    const base = { struct: true, zones: true, fvg: true, wicks: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false };
+    const base = { struct: true, zones: true, fvg: true, wicks: false, fpp: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false };
     try {
       const saved = JSON.parse(stored("q.chart.on") ?? "{}") as Partial<typeof base>;
       for (const k of Object.keys(base) as (keyof typeof base)[]) if (typeof saved[k] === "boolean") base[k] = saved[k];
@@ -525,6 +608,10 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
   measuring.current = measureOn;
   const measure = useRef<{ a: Pt; b: Pt; done: boolean } | null>(null);
   const wickRead = useRef<WickRead | null>(null);
+  const fppRead = useRef<FppRead | null>(null);
+  const fppCb = useRef(onFpp);
+  fppCb.current = onFpp;
+  const baseOffset = useRef(REST_OFFSET);
   const wicksCb = useRef(onWicks);
   wicksCb.current = onWicks;
   const priceCb = useRef(onPrice);
@@ -768,6 +855,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
       showStruct: onRef.current.struct,
       showVp: onRef.current.vp,
       wicks: onRef.current.wicks ? mapWicks() : [],
+      fpp: onRef.current.fpp && fppRead.current ? { start: B.length, base: B[B.length - 1].c, read: fppRead.current } : null,
       showWicks: onRef.current.wicks,
     });
     // New or moved zones fetch their resting size straight away rather than at the next refresh.
@@ -978,6 +1066,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
           const lane = flow ? Math.min(260, Math.max(130, width * 0.34)) : 0;
           const rightOffset = flow ? Math.round((VIEW_BARS * lane) / (width - lane)) : REST_OFFSET;
           a.chart.timeScale().applyOptions({ rightOffset });
+          baseOffset.current = rightOffset;
           a.chart.timeScale().setVisibleLogicalRange({ from: r.bars.length - VIEW_BARS, to: r.bars.length + rightOffset });
         }
       } catch {
@@ -1090,6 +1179,47 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
       });
   }, [analysis, on.liq, sym]);
 
+  // FPP for this coin and timeframe. Opens room right of the live candle for the path, and gives it back when off.
+  useEffect(() => {
+    fppRead.current = null;
+    fppCb.current?.(null);
+    if (!on.fpp) {
+      api.current?.chart.timeScale().applyOptions({ rightOffset: baseOffset.current });
+      paint(false);
+      return;
+    }
+    let dead = false;
+    let framed = false;
+    const load = async () => {
+      try {
+        const r = (await (await fetch(`/api/fpp?sym=${sym}&tf=${tf}`)).json()) as FppRead & { error?: string };
+        if (dead || !r.candles) return;
+        fppRead.current = r;
+        fppCb.current?.(r);
+        const a = api.current;
+        if (a && !framed) {
+          framed = true;
+          const need = r.horizon + 6;
+          a.chart.timeScale().applyOptions({ rightOffset: Math.max(baseOffset.current, need) });
+          const n = bars.current.length;
+          if (n) a.chart.timeScale().setVisibleLogicalRange({ from: n - 150, to: n + need });
+        }
+        paint(false);
+      } catch {
+        /* the next refresh retries */
+      }
+    };
+    void load();
+    const id = setInterval(load, 60000);
+    return () => {
+      dead = true;
+      clearInterval(id);
+      fppRead.current = null;
+      fppCb.current?.(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [on.fpp, sym, tf]);
+
   // Wick flow and sweeps for this coin and timeframe, refreshed while the toggle is on.
   useEffect(() => {
     wickRead.current = null;
@@ -1159,6 +1289,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks }: Props
     ["zones", "ZONES"],
     ["fvg", "FVG"],
     ["wicks", "WICKS"],
+    ["fpp", "FPP"],
     ["ema", "EMA"],
     ["ribbon", "AVWAP"],
     ["vp", "VP"],
