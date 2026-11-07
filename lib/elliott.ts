@@ -264,11 +264,11 @@ function countsAt(P: Piv[], L: { i: number; price: number }, close: number, ctx:
           if (!(rb > 0.236 && rb < 1.382)) continue;
           const shape = rb < 0.8 ? "zigzag" : rb <= 1.05 ? "flat" : "expanded flat";
           fits.push(shape === "zigzag" ? fit(rb, [[0.5, 0.3], [0.618, 0.3]]) : fit(rb, [[1, 0.1], [1.236, 0.15, 0.8]]));
-          checks.push({ ok: true, text: `Wave B retraced ${pct(rb)} of A, a ${shape}` });
+          checks.push({ ok: true, text: `Wave B retraced ${pct(rb)} of A, ${shape === "expanded flat" ? "an" : "a"} ${shape}` });
           if (!(xc < x[7])) continue;
           title = `Correction (${shape}): wave C in progress`;
           tg = [[x[7] - 0.618 * A, "C = 0.618 × A"], [x[7] - A, "C = A"], [x[7] - 1.618 * A, "C = 1.618 × A"]];
-          inv = [Math.max(x[5], x[7]), "end of wave B"];
+          inv = [Math.max(x[5], x[7]), x[7] >= x[5] ? "end of wave B" : "end of wave 5"];
           points = [...imp(5), pt(s[6], "A", r2s(ra)), pt(s[7], "B", r2s(rb))];
           liveLabel = "C";
           next = d === 1 ? -1 : 1;
@@ -371,10 +371,10 @@ function simpleCounts(P: Piv[], L: { i: number; price: number }, close: number, 
           points: [pt(s0, "", null), pt(s1, "A", null), pt(s2, "B", r2s(rb))],
           live: { t: B[L.i].t, price: L.price, label: "C", high: d < 0, ratio: null },
           targets: ahead.map(([v, label]) => ({ price: d * v, label })),
-          invalid: { price: d * (shape === "zigzag" ? x2 : Math.max(x0, x2)), label: shape === "zigzag" ? "end of wave B" : "the higher of A's start and B's end" },
+          invalid: { price: d * (shape === "zigzag" ? x2 : Math.max(x0, x2)), label: shape === "zigzag" ? "end of wave B" : x2 >= x0 ? "end of wave B (it ran past A's start)" : "start of wave A" },
           then: null,
           checks: [
-            { ok: true, text: `Wave B retraced ${pct(rb)} of A, a ${shape}` },
+            { ok: true, text: `Wave B retraced ${pct(rb)} of A, ${shape === "expanded flat" ? "an" : "a"} ${shape}` },
             { ok: sig === 1, text: sig === 1 ? "The correction starts from a real extreme" : "The correction does not start from a clear extreme" },
           ],
           key: `${ctx.size}|abc|${s0.i}`,
