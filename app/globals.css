@@ -316,3 +316,14 @@ a.amber, a.dim { text-decoration: none; }
 .ew-checks li.no { color: var(--dim); }
 .ew-alt { padding: 7px 10px; border-bottom: 1px solid #141414; font-size: 11px; line-height: 1.5; color: #cfcfcf; }
 .ew-alt i { display: block; font-style: normal; color: var(--dim); font-size: 10px; letter-spacing: .05em; }
+
+/* candle close countdowns */
+.closes { display: flex; align-items: baseline; gap: 12px; font-size: 11px; margin-left: auto; }
+.closes + .status { margin-left: 16px; }
+.closes em { font-style: normal; color: var(--faint); font-size: 10px; letter-spacing: .05em; }
+.closes span { color: var(--dim); }
+.closes span i { font-style: normal; color: var(--faint); margin-right: 4px; }
+.closes span[data-on="true"], .closes span[data-on="true"] i { color: var(--amber); }
+@media (max-width: 1000px) {
+  .topbar .closes { display: none; }
+}

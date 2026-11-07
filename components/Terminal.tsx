@@ -10,6 +10,7 @@ import type { EwView } from "./Chart.tsx";
 import type { Analysis, Book, Forecast, Frame, NewsItem, NewsResp, ScreenerRow, UniverseCoin } from "@/lib/types.ts";
 import { fmtPct, fmtPx, fmtUsd, pxDigits, setActiveSym, setPriceDigits, toneClass } from "@/lib/format.ts";
 import { DEFAULT_LIST } from "@/lib/coins.ts";
+import CloseTimers from "./CloseTimers.tsx";
 
 const Chart = dynamic(() => import("./Chart"), { ssr: false });
 
@@ -576,6 +577,7 @@ export default function Terminal() {
   const [wicks, setWicks] = useState<WickRead | null>(null);
   const [goku, setGoku] = useState<GokuView | null>(null);
   const [ew, setEw] = useState<EwView | null>(null);
+  const [chartTf, setChartTf] = useState<string>("");
   const [tick, setTick] = useState<Record<string, Tick>>({});
   const tickAt = useRef(0);
   const search = useRef<HTMLInputElement>(null);
@@ -695,6 +697,7 @@ export default function Terminal() {
         <span className="price">{price ? fmtPx(price) : "—"}</span>
         <span className={toneClass(chg)}>{fmtPct(chg)}</span>
         {a?.ta.frames.map((f) => <span key={f.tf} className="kv"><span className="hide-m">{f.tf} </span><b className={trendTone(f.trend)}>{arrow(f.trend)}</b></span>)}
+        <CloseTimers active={chartTf} />
         <span className="status">{err ? "DATA ERROR" : a ? new Date(a.asOf).toLocaleTimeString("en-GB") : "LOADING"}</span>
       </header>
 
@@ -735,7 +738,7 @@ export default function Terminal() {
         <main className={`main ${tab === "CHART" || tab === "TPO" ? "fill" : ""}`}>
           {tab === "CHART" && (
             <>
-              <Chart sym={sym} onPrice={setLive} digits={pxDigits(price || 1, sym)} onWicks={setWicks} onEw={setEw} onGoku={setGoku} />
+              <Chart sym={sym} onPrice={setLive} digits={pxDigits(price || 1, sym)} onWicks={setWicks} onEw={setEw} onTf={setChartTf} onGoku={setGoku} />
               <div className="ctx-inline"><StructurePanel a={a} price={price} wicks={wicks} ew={ew} goku={goku} /></div>
             </>
           )}

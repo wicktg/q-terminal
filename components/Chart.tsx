@@ -23,6 +23,7 @@ import { colsFromBars } from "@/lib/mtf.ts";
 import { poolsAt, walk, zonesAt } from "@/lib/structure.ts";
 import { fmtPx, fmtUsd, hlBar, hlName, pxDigits, type HlCandle } from "@/lib/format.ts";
 import { FlowLayer } from "./flow-layer.ts";
+import { clock, closesIn } from "./CloseTimers.tsx";
 import ZoneCard, { type CardZone } from "./ZoneCard.tsx";
 import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
 import { wickTag, wickText, type WickEvent, type WickRead } from "@/lib/wicks.ts";
@@ -720,12 +721,44 @@ class GokuMarks implements ISeriesPrimitive<Time> {
   }
 }
 
+// The countdown to the candle close, drawn on the price axis just under the live price, as TradingView does.
+class CloseClock implements ISeriesPrimitive<Time> {
+  private p: SeriesAttachedParameter<Time> | null = null;
+  private price = NaN;
+  private label = "";
+  attached(p: SeriesAttachedParameter<Time>) {
+    this.p = p;
+  }
+  detached() {
+    this.p = null;
+  }
+  set(price: number, label: string) {
+    this.price = price;
+    this.label = label;
+    this.p?.requestUpdate();
+  }
+  updateAllViews() {}
+  priceAxisViews() {
+    const y = () => (Number.isFinite(this.price) ? (this.p?.series.priceToCoordinate(this.price) ?? null) : null);
+    return [
+      {
+        coordinate: () => (y() ?? -100) + 17,
+        text: () => this.label,
+        textColor: () => "#d9d9d9",
+        backColor: () => "#262626",
+        visible: () => y() !== null && !!this.label,
+        tickVisible: () => false,
+      },
+    ];
+  }
+}
+
 const BASE_ON = { struct: true, zones: true, fvg: true, wicks: false, ew: false, ema: false, ribbon: false, vp: false, tpo: false };
 type On = typeof BASE_ON;
 const ALL_OFF: On = { struct: false, zones: false, fvg: false, wicks: false, ew: false, ema: false, ribbon: false, vp: false, tpo: false };
 type GokuApi = { fast: ISeriesApi<"Line">; slow: ISeriesApi<"Line">; k: ISeriesApi<"Line">; d: ISeriesApi<"Line">; w1: ISeriesApi<"Line">; w2: ISeriesApi<"Line">; osc: OscMarks; marks: GokuMarks; lines: IPriceLine[] };
 
-type Props = { sym: string; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void; onEw?: (e: EwView | null) => void; onGoku?: (g: GokuView | null) => void };
+type Props = { sym: string; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void; onEw?: (e: EwView | null) => void; onGoku?: (g: GokuView | null) => void; onTf?: (tf: string) => void };
 
 // GOKU swaps the whole pane layout, so flipping it rebuilds the chart. Toggles, timeframe and coin are kept.
 export default function Chart(props: Props) {
@@ -738,7 +771,7 @@ export default function Chart(props: Props) {
   return <ChartView key={goku ? "goku" : "std"} {...props} goku={goku} onGokuFlip={flip} />;
 }
 
-function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, goku, onGokuFlip }: Props & { goku: boolean; onGokuFlip: () => void }) {
+function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, onGokuFlip }: Props & { goku: boolean; onGokuFlip: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const legend = useRef<HTMLDivElement>(null);
   const flowCanvas = useRef<HTMLCanvasElement>(null);
@@ -781,6 +814,7 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, goku, onGokuFl
     overlay: Overlay;
     cvdTag: PaneLabel | null;
     g: GokuApi | null;
+    clock: CloseClock;
     flow: FlowLayer;
   } | null>(null);
   const bars = useRef<Bar[]>([]);
@@ -799,6 +833,8 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, goku, onGokuFl
   measuring.current = measureOn;
   const measure = useRef<{ a: Pt; b: Pt; done: boolean } | null>(null);
   const wickRead = useRef<WickRead | null>(null);
+  const onTfRef = useRef(onTf);
+  onTfRef.current = onTf;
   const ewCb = useRef(onEw);
   ewCb.current = onEw;
   const ewRead = useRef<EwRead | null>(null);
@@ -845,6 +881,8 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, goku, onGokuFl
     const aLo = line("#f5a623", 1, 0, LineStyle.Dashed);
     const overlay = new Overlay();
     candle.attachPrimitive(overlay);
+    const closeClock = new CloseClock();
+    candle.attachPrimitive(closeClock);
     const flowLayer = new FlowLayer(flowCanvas.current!, chart, candle);
     if (goku) {
       // GOKU: volume along the foot of the price pane, then a Stoch RSI pane and a WaveTrend pane.
@@ -876,7 +914,7 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, goku, onGokuFl
       w1.attachPrimitive(osc);
       const marks = new GokuMarks();
       candle.attachPrimitive(marks);
-      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP: null, cvdS: null, overlay, cvdTag: null, g: { fast, slow, k, d, w1, w2, osc, marks, lines: [] }, flow: flowLayer };
+      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP: null, cvdS: null, overlay, cvdTag: null, g: { fast, slow, k, d, w1, w2, osc, marks, lines: [] }, clock: closeClock, flow: flowLayer };
     } else {
       const vol = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceLineVisible: false, lastValueVisible: false }, 1);
       const cvdP = chart.addSeries(LineSeries, { color: "#f5a623", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" } }, 2);
@@ -886,7 +924,7 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, goku, onGokuFl
       vol.attachPrimitive(new PaneLabel([{ text: "VOLUME", color: "#808080" }]));
       const cvdTag = new PaneLabel(CVD_TAGS);
       cvdP.attachPrimitive(cvdTag);
-      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP, cvdS, overlay, cvdTag, g: null, flow: flowLayer };
+      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP, cvdS, overlay, cvdTag, g: null, clock: closeClock, flow: flowLayer };
     }
     if (!goku) gokuCb.current?.(null);
 
@@ -1435,6 +1473,18 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, goku, onGokuFl
     return () => window.removeEventListener("keydown", key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The axis countdown follows the chart's timeframe and the live price; the page header shows every timeframe.
+  useEffect(() => {
+    onTfRef.current?.(tf);
+    const go = () => {
+      const B = bars.current;
+      api.current?.clock.set(B.length ? B[B.length - 1].c : NaN, clock(closesIn(tf)));
+    };
+    go();
+    const id = setInterval(go, 1000);
+    return () => clearInterval(id);
+  }, [tf]);
 
   // Axis decimals follow the coin's tick size once the watchlist has loaded it.
   useEffect(() => {
