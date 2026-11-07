@@ -33,6 +33,9 @@ export type EwCount = {
   targets: EwLevel[]; // where the wave in progress tends to end, nearest first
   invalid: EwLevel; // trading beyond this proves the count wrong
   then: EwLevel | null; // where the following wave tends to go, for wave 4 and B
+  // The price that proves the count right. Usually the first target; for waves 2 and 4, which move toward their
+  // invalidation, it is the end of the wave before them, because clearing it means the next impulse wave has begun.
+  goal: EwLevel;
   checks: EwCheck[];
   key: string; // identity of the count, for the replay
 };
@@ -299,6 +302,7 @@ function countsAt(P: Piv[], L: { i: number; price: number }, close: number, ctx:
       targets: ahead.map(([v, label]) => ({ price: px(v), label })),
       invalid: { price: px(inv[0]), label: inv[1] },
       then: then ? { price: px(then[0]), label: then[1] } : null,
+      goal: kind === "4" ? { price: s[3].price, label: "beyond the end of wave 3 (wave 5 under way)" } : { price: px(ahead[0][0]), label: ahead[0][1] },
       checks,
       key: `${ctx.size}|${kind}|${s[0].i}`,
     });
@@ -338,6 +342,7 @@ function simpleCounts(P: Piv[], L: { i: number; price: number }, close: number, 
         targets: ahead.map(([v, label]) => ({ price: d * v, label })),
         invalid: { price: s0.price, label: "start of wave 1 (wave 2 can never go beyond it)" },
         then: { price: d * (x1 - 0.618 * w1 + 1.618 * w1), label: "then wave 3 = 1.618 × 1" },
+        goal: { price: s1.price, label: "beyond the end of wave 1 (wave 3 under way)" },
         checks: [
           { ok: true, text: "Wave 2 has not retraced all of wave 1" },
           { ok: strong, text: strong ? "Wave 1 carried momentum (Elliott Wave Oscillator)" : "Wave 1 carried little momentum" },
@@ -373,6 +378,7 @@ function simpleCounts(P: Piv[], L: { i: number; price: number }, close: number, 
           targets: ahead.map(([v, label]) => ({ price: d * v, label })),
           invalid: { price: d * (shape === "zigzag" ? x2 : Math.max(x0, x2)), label: shape === "zigzag" ? "end of wave B" : x2 >= x0 ? "end of wave B (it ran past A's start)" : "start of wave A" },
           then: null,
+          goal: { price: d * ahead[0][0], label: ahead[0][1] },
           checks: [
             { ok: true, text: `Wave B retraced ${pct(rb)} of A, ${shape === "expanded flat" ? "an" : "a"} ${shape}` },
             { ok: sig === 1, text: sig === 1 ? "The correction starts from a real extreme" : "The correction does not start from a clear extreme" },
@@ -414,7 +420,7 @@ export function readElliott(B: Bar[], opts: { closed?: number; replay?: boolean 
   };
   const now = at(n - 1);
 
-  // Replay: each new primary count is a call. Did its first target trade before its invalidation?
+  // Replay: each new primary count is a call. Did it prove right (its goal traded) before its invalidation?
   let [calls, hit, miss, open, base] = [0, 0, 0, 0, 0];
   if (opts.replay !== false) {
     let lastKey = "";
@@ -422,9 +428,10 @@ export function readElliott(B: Bar[], opts: { closed?: number; replay?: boolean 
       const c = at(j).primary;
       if (!c || c.key === lastKey) continue;
       lastKey = c.key;
-      const T = c.targets[0].price;
+      const T = c.goal.price;
       const X = c.invalid.price;
-      const up = c.next > 0;
+      const up = T > B[j].c;
+      if (up ? X >= B[j].c : X <= B[j].c) continue; // the goal and the invalidation must sit on opposite sides
       const dT = Math.abs(T - B[j].c);
       const dX = Math.abs(B[j].c - X);
       if (!dT || !dX) continue;

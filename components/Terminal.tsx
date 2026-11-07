@@ -131,7 +131,7 @@ function ElliottPanel({ e }: { e: EwView }) {
       <div className={`pv ${edge ? "up" : ""}`}>
         {s.n ? (
           <>
-            Replay on these candles: {s.n} counts. The first target traded before the invalidation in {pc(rate)} of the {done} that finished, against {pc(s.base)} for a coin toss with the same distances.
+            Replay on these candles: {s.n} counts. {pc(rate)} of the {done} that finished proved right before their invalidation (the first target traded, or for waves 2 and 4 the next wave cleared the prior wave&apos;s end), against {pc(s.base)} for a coin toss with the same distances.
             {edge ? " Better than chance on this coin and timeframe, but small samples fade." : " No proven edge here, so read the count as a map, not a signal."}
           </>
         ) : (
