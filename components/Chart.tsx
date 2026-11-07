@@ -17,7 +17,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { Analysis, Bar, KlinesResp, Profile } from "@/lib/types.ts";
+import type { Bar, KlinesResp, Profile } from "@/lib/types.ts";
 import { avwap, cvd, delta, ema, ribbonAnchors, volumeProfile } from "@/lib/quant.ts";
 import { colsFromBars } from "@/lib/mtf.ts";
 import { poolsAt, walk, zonesAt } from "@/lib/structure.ts";
@@ -26,7 +26,7 @@ import { FlowLayer } from "./flow-layer.ts";
 import ZoneCard, { type CardZone } from "./ZoneCard.tsx";
 import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
 import { wickTag, wickText, type WickEvent, type WickRead } from "@/lib/wicks.ts";
-import type { FppRead } from "@/lib/fpp.ts";
+import { readElliott, type EwLevel, type EwPoint, type EwRead } from "@/lib/elliott.ts";
 import { GOKU_HOLD, readGoku, type GokuRead, type GokuView } from "@/lib/goku.ts";
 
 const TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
@@ -71,7 +71,8 @@ type DrawPool = { t: number; price: number };
 type DrawWick = WickEvent & { tag: string; strong: boolean };
 type Pt = { l: number; p: number }; // bar index and price
 type DrawMeasure = { a: Pt; b: Pt; up: boolean; lines: string[] };
-type DrawFpp = { start: number; base: number; read: FppRead };
+type DrawEw = { pts: EwPoint[]; live: EwPoint; targets: EwLevel[]; invalid: EwLevel; then: EwLevel | null };
+export type EwView = EwRead & { sym: string; tf: string; px: number };
 type Draw = {
   ribbon: { t: number; a: number; b: number }[];
   wicks: DrawWick[];
@@ -79,7 +80,7 @@ type Draw = {
   measure: DrawMeasure | null;
   measureHint: string | null;
   zoneUsd: Record<string, ZoneAmount>; // resting size per zone, keyed top|bottom
-  fpp: DrawFpp | null;
+  ew: DrawEw | null;
   zones: DrawZone[];
   gaps: DrawZone[];
   swings: DrawSwing[];
@@ -129,7 +130,7 @@ function readChart(B: Bar[], tf: string) {
 
 // Draws what lightweight-charts has no series for: ribbon fill, order blocks, volume profile.
 class Overlay implements ISeriesPrimitive<Time> {
-  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zoneUsd: {}, fpp: null, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
+  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zoneUsd: {}, ew: null, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
   private p: SeriesAttachedParameter<Time> | null = null;
   attached(p: SeriesAttachedParameter<Time>) {
     this.p = p;
@@ -147,85 +148,106 @@ class Overlay implements ISeriesPrimitive<Time> {
       { zOrder: () => "bottom" as const, renderer: () => ({ draw: (t: never) => this.draw(t) }) },
       { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawWickMarks(t) }) },
       { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawMeasure(t) }) },
-      { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawFpp(t) }) },
+      { zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.drawEw(t) }) },
     ];
   }
-  // FPP: the projected path as white candles to the right of the live candle, over a faint band of likely outcomes.
-  private drawFpp(target: { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void }) {
+  // Elliott Wave: the primary count as a path with its waves numbered and Fibonacci ratios beside them, the wave in
+  // progress dashed to its extreme, a projection to the first target, the targets, and the price that kills the count.
+  private drawEw(target: { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void }) {
     const p = this.p;
-    const f = this.d.fpp;
-    if (!p || !f) return;
-    const ts_ = p.chart.timeScale();
-    const r = f.read;
-    const price = (v: number) => f.base * Math.exp(v * r.atrPct);
-    const X = (k: number) => ts_.logicalToCoordinate((f.start + k) as Logical);
-    const Y = (v: number) => p.series.priceToCoordinate(price(v));
+    const e = this.d.ew;
+    if (!p || !e) return;
+    const tsc = p.chart.timeScale();
+    const X = (t: number) => tsc.timeToCoordinate(ts(t));
+    const Y = (v: number) => p.series.priceToCoordinate(v);
+    const AMBER = "#f5a623";
     target.useBitmapCoordinateSpace(({ context: c, horizontalPixelRatio: hr, verticalPixelRatio: vr, bitmapSize }) => {
-      const x0 = X(-1);
-      const y0 = Y(0);
-      if (x0 === null || y0 === null) return;
-      // Band: where the middle half of similar past moments ended up at each step.
-      const top: [number, number][] = [[x0 * hr, y0 * vr]];
-      const bot: [number, number][] = [[x0 * hr, y0 * vr]];
-      for (let k = 0; k < r.horizon; k++) {
-        const x = X(k);
-        const a = Y(r.q75[k]);
-        const b = Y(r.q25[k]);
-        if (x === null || a === null || b === null) continue;
-        top.push([x * hr, a * vr]);
-        bot.push([x * hr, b * vr]);
-      }
-      if (top.length > 1) {
+      const nodes = [...e.pts, e.live].map((q) => ({ q, x: X(q.t), y: Y(q.price) }));
+      const last = nodes.length - 1;
+      c.lineWidth = 1.6 * hr;
+      c.strokeStyle = AMBER;
+      for (let i = 1; i < nodes.length; i++) {
+        const [u, v] = [nodes[i - 1], nodes[i]];
+        if (u.x === null || u.y === null || v.x === null || v.y === null) continue;
+        c.setLineDash(i === last ? [5 * hr, 4 * hr] : []);
         c.beginPath();
-        top.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y)));
-        [...bot].reverse().forEach(([x, y]) => c.lineTo(x, y));
-        c.closePath();
-        c.fillStyle = "rgba(255,255,255,0.06)";
+        c.moveTo(u.x * hr, u.y * vr);
+        c.lineTo(v.x * hr, v.y * vr);
+        c.stroke();
+      }
+      c.setLineDash([]);
+      const o = nodes[0];
+      if (o.x !== null && o.y !== null) {
+        c.beginPath();
+        c.arc(o.x * hr, o.y * vr, 3 * hr, 0, Math.PI * 2);
+        c.fillStyle = AMBER;
         c.fill();
       }
-      // Candles: hollow when the projected candle closes up, solid when it closes down.
-      const space = ts_.options().barSpacing * hr;
-      const bw = Math.max(1, Math.min(space * 0.7, 14 * hr));
-      for (let k = 0; k < r.candles.length; k++) {
-        const x = X(k);
-        const q = r.candles[k];
-        const [yo, yh, yl, yc] = [Y(q.o), Y(q.h), Y(q.l), Y(q.c)];
-        if (x === null || yo === null || yh === null || yl === null || yc === null) continue;
-        const cx = x * hr;
-        c.fillStyle = "rgba(255,255,255,0.8)";
-        c.fillRect(cx - 0.5 * hr, yh * vr, hr, Math.max(1, (yl - yh) * vr));
-        const t = Math.min(yo, yc) * vr;
-        const h = Math.max(1, Math.abs(yc - yo) * vr);
-        if (q.c >= q.o) {
-          c.fillStyle = "#000";
-          c.fillRect(cx - bw / 2, t, bw, h);
-          c.strokeStyle = "rgba(255,255,255,0.9)";
-          c.lineWidth = hr;
-          c.strokeRect(cx - bw / 2 + 0.5 * hr, t + 0.5 * vr, bw - hr, Math.max(1, h - vr));
-        } else {
-          c.fillStyle = "rgba(255,255,255,0.85)";
-          c.fillRect(cx - bw / 2, t, bw, h);
-        }
-      }
-      // Label at the end of the path: direction, odds, median move, and whether it has shown an edge here.
-      const xe = X(r.horizon - 1);
-      const ye = Y(r.median[r.horizon - 1]);
-      if (xe === null || ye === null) return;
-      const move = (Math.exp(r.median[r.horizon - 1] * r.atrPct) - 1) * 100;
-      const lines = [`FPP ${r.dir > 0 ? "▲" : "▼"} ${Math.round(r.prob * 100)}%  ${move >= 0 ? "+" : ""}${move.toFixed(2)}%`, r.test.edge ? `edge in replay ${Math.round(r.test.hit * 100)}%` : `no proven edge here`];
-      c.font = `600 ${11 * vr}px monospace`;
+      c.textAlign = "center";
       c.textBaseline = "middle";
-      const w = Math.max(...lines.map((l) => c.measureText(l).width)) + 14 * hr;
-      const lh = 15 * vr;
-      const hh = lines.length * lh + 6 * vr;
-      const lx = Math.min(Math.max(2 * hr, xe * hr - w / 2), bitmapSize.width - w - 2 * hr);
-      const ly = r.dir > 0 ? Math.max(2 * vr, ye * vr - hh - 14 * vr) : Math.min(bitmapSize.height - hh - 2 * vr, ye * vr + 14 * vr);
-      c.fillStyle = "rgba(255,255,255,0.95)";
-      c.fillRect(lx, ly, w, hh);
-      lines.forEach((l, i) => {
-        c.fillStyle = i === 0 ? "#000" : "#555";
-        c.fillText(l, lx + 7 * hr, ly + 3 * vr + lh * i + lh / 2);
+      nodes.forEach((n, i) => {
+        if (n.x === null || n.y === null || !n.q.label) return;
+        const live = i === last;
+        const off = n.q.high ? -16 : 16;
+        const [cx, cy, r] = [n.x * hr, (n.y + off) * vr, 8.5 * hr];
+        c.beginPath();
+        c.arc(cx, cy, r, 0, Math.PI * 2);
+        c.fillStyle = live ? "rgba(0,0,0,0.85)" : AMBER;
+        c.fill();
+        if (live) {
+          c.setLineDash([3 * hr, 2 * hr]);
+          c.strokeStyle = AMBER;
+          c.lineWidth = 1.4 * hr;
+          c.stroke();
+          c.setLineDash([]);
+        }
+        c.font = `600 ${11 * vr}px monospace`;
+        c.fillStyle = live ? AMBER : "#000";
+        c.fillText(n.q.label, cx, cy + 0.5 * vr);
+        if (n.q.ratio) {
+          c.font = `${9.5 * vr}px monospace`;
+          c.fillStyle = "#a8a8a8";
+          c.fillText(n.q.ratio, cx, cy + (n.q.high ? -15 : 15) * vr);
+        }
       });
+      c.textAlign = "left";
+      const lv = nodes[last];
+      const x0 = Math.max(0, (lv.x ?? 0) * hr);
+      const level = (price: number, color: string, text: string, dash: number[]) => {
+        const y = Y(price);
+        if (y === null) return;
+        c.strokeStyle = color;
+        c.lineWidth = hr;
+        c.setLineDash(dash);
+        c.beginPath();
+        c.moveTo(x0, y * vr);
+        c.lineTo(bitmapSize.width, y * vr);
+        c.stroke();
+        c.setLineDash([]);
+        c.font = `${10 * vr}px monospace`;
+        const w = c.measureText(text).width;
+        const tx = Math.max(2 * hr, bitmapSize.width - w - 8 * hr); // right-aligned so it never runs under the price axis
+        c.fillStyle = "rgba(0,0,0,0.78)";
+        c.fillRect(tx - 3 * hr, y * vr - 14 * vr, w + 6 * hr, 12 * vr);
+        c.fillStyle = color;
+        c.fillText(text, tx, y * vr - 8 * vr);
+      };
+      e.targets.slice(0, 3).forEach((t, i) => level(t.price, i === 0 ? "#2bbf85" : "rgba(43,191,133,0.6)", `T${i + 1} ${fmtPx(t.price)} · ${t.label}`, [6 * hr, 4 * hr]));
+      level(e.invalid.price, "#e5534b", `INVALID ${fmtPx(e.invalid.price)}`, [2 * hr, 3 * hr]);
+      const yT = Y(e.targets[0].price);
+      if (lv.x !== null && lv.y !== null && yT !== null) {
+        const step = tsc.options().barSpacing * 10;
+        c.strokeStyle = "rgba(245,166,35,0.6)";
+        c.lineWidth = 1.2 * hr;
+        c.setLineDash([4 * hr, 4 * hr]);
+        c.beginPath();
+        c.moveTo(lv.x * hr, lv.y * vr);
+        c.lineTo((lv.x + step) * hr, yT * vr);
+        const yN = e.then ? Y(e.then.price) : null;
+        if (yN !== null) c.lineTo((lv.x + 2 * step) * hr, yN * vr);
+        c.stroke();
+        c.setLineDash([]);
+      }
       c.textBaseline = "alphabetic";
     });
   }
@@ -698,12 +720,12 @@ class GokuMarks implements ISeriesPrimitive<Time> {
   }
 }
 
-const BASE_ON = { struct: true, zones: true, fvg: true, wicks: false, fpp: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false };
+const BASE_ON = { struct: true, zones: true, fvg: true, wicks: false, ew: false, ema: false, ribbon: false, vp: false, tpo: false };
 type On = typeof BASE_ON;
-const ALL_OFF: On = { struct: false, zones: false, fvg: false, wicks: false, fpp: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false };
+const ALL_OFF: On = { struct: false, zones: false, fvg: false, wicks: false, ew: false, ema: false, ribbon: false, vp: false, tpo: false };
 type GokuApi = { fast: ISeriesApi<"Line">; slow: ISeriesApi<"Line">; k: ISeriesApi<"Line">; d: ISeriesApi<"Line">; w1: ISeriesApi<"Line">; w2: ISeriesApi<"Line">; osc: OscMarks; marks: GokuMarks; lines: IPriceLine[] };
 
-type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void; onFpp?: (f: FppRead | null) => void; onGoku?: (g: GokuView | null) => void };
+type Props = { sym: string; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void; onEw?: (e: EwView | null) => void; onGoku?: (g: GokuView | null) => void };
 
 // GOKU swaps the whole pane layout, so flipping it rebuilds the chart. Toggles, timeframe and coin are kept.
 export default function Chart(props: Props) {
@@ -716,7 +738,7 @@ export default function Chart(props: Props) {
   return <ChartView key={goku ? "goku" : "std"} {...props} goku={goku} onGokuFlip={flip} />;
 }
 
-function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, goku, onGokuFlip }: Props & { goku: boolean; onGokuFlip: () => void }) {
+function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, goku, onGokuFlip }: Props & { goku: boolean; onGokuFlip: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const legend = useRef<HTMLDivElement>(null);
   const flowCanvas = useRef<HTMLCanvasElement>(null);
@@ -760,7 +782,6 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
     cvdTag: PaneLabel | null;
     g: GokuApi | null;
     flow: FlowLayer;
-    liq: IPriceLine[];
   } | null>(null);
   const bars = useRef<Bar[]>([]);
   const tape = useRef<Bar[]>([]); // Binance bars behind CVD while the candles come from Hyperliquid
@@ -778,10 +799,9 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
   measuring.current = measureOn;
   const measure = useRef<{ a: Pt; b: Pt; done: boolean } | null>(null);
   const wickRead = useRef<WickRead | null>(null);
-  const fppRead = useRef<FppRead | null>(null);
-  const fppCb = useRef(onFpp);
-  fppCb.current = onFpp;
-  const baseOffset = useRef(REST_OFFSET);
+  const ewCb = useRef(onEw);
+  ewCb.current = onEw;
+  const ewRead = useRef<EwRead | null>(null);
   const wicksCb = useRef(onWicks);
   wicksCb.current = onWicks;
   const gokuCb = useRef(onGoku);
@@ -856,7 +876,7 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
       w1.attachPrimitive(osc);
       const marks = new GokuMarks();
       candle.attachPrimitive(marks);
-      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP: null, cvdS: null, overlay, cvdTag: null, g: { fast, slow, k, d, w1, w2, osc, marks, lines: [] }, flow: flowLayer, liq: [] };
+      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP: null, cvdS: null, overlay, cvdTag: null, g: { fast, slow, k, d, w1, w2, osc, marks, lines: [] }, flow: flowLayer };
     } else {
       const vol = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceLineVisible: false, lastValueVisible: false }, 1);
       const cvdP = chart.addSeries(LineSeries, { color: "#f5a623", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" } }, 2);
@@ -866,7 +886,7 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
       vol.attachPrimitive(new PaneLabel([{ text: "VOLUME", color: "#808080" }]));
       const cvdTag = new PaneLabel(CVD_TAGS);
       cvdP.attachPrimitive(cvdTag);
-      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP, cvdS, overlay, cvdTag, g: null, flow: flowLayer, liq: [] };
+      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP, cvdS, overlay, cvdTag, g: null, flow: flowLayer };
     }
     if (!goku) gokuCb.current?.(null);
 
@@ -1064,7 +1084,7 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
       showStruct: onRef.current.struct,
       showVp: onRef.current.vp,
       wicks: onRef.current.wicks ? mapWicks() : [],
-      fpp: onRef.current.fpp && fppRead.current ? { start: B.length, base: B[B.length - 1].c, read: fppRead.current } : null,
+      ew: ewDraw(full),
       showWicks: onRef.current.wicks,
     });
     // New or moved zones fetch their resting size straight away rather than at the next refresh.
@@ -1078,6 +1098,18 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
     if (a.g) paintGoku(a.g, full);
     priceCb.current(B[B.length - 1].c);
     renderLegend();
+  };
+
+  // Elliott Wave is recounted when a candle closes (with its replay), and redrawn from that count on ticks.
+  const ewDraw = (full: boolean): DrawEw | null => {
+    const B = bars.current;
+    if (full) {
+      ewRead.current = onRef.current.ew && B.length > 200 ? readElliott(B, { closed: B.length - 1 }) : null;
+      const r = ewRead.current;
+      ewCb.current?.(r ? { ...r, sym, tf: tfRef.current, px: B[B.length - 1].c } : null);
+    }
+    const c = onRef.current.ew ? ewRead.current?.primary : null;
+    return c ? { pts: c.points, live: c.live, targets: c.targets, invalid: c.invalid, then: c.then } : null;
   };
 
   // GOKU lines on every tick; dots, tags, signals, levels and the side panel when a candle closes.
@@ -1327,7 +1359,6 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
           const lane = flow ? Math.min(260, Math.max(130, width * 0.34)) : 0;
           const rightOffset = flow ? Math.round((VIEW_BARS * lane) / (width - lane)) : REST_OFFSET;
           a.chart.timeScale().applyOptions({ rightOffset });
-          baseOffset.current = rightOffset;
           a.chart.timeScale().setVisibleLogicalRange({ from: r.bars.length - VIEW_BARS, to: r.bars.length + rightOffset });
         }
       } catch {
@@ -1416,71 +1447,6 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [on]);
 
-  // liquidation levels as price lines
-  useEffect(() => {
-    const a = api.current;
-    if (!a) return;
-    a.liq.forEach((l) => a.candle.removePriceLine(l));
-    a.liq = [];
-    if (!analysis || !on.liq || analysis.sym !== sym) return;
-    [...analysis.liq.clusters]
-      .sort((x, y) => y.usd - x.usd)
-      .slice(0, 6)
-      .forEach((c) => {
-        a.liq.push(
-          a.candle.createPriceLine({
-            price: c.price,
-            color: c.side === "short" ? "rgba(229,83,75,0.6)" : "rgba(43,191,133,0.6)",
-            lineWidth: 1,
-            lineStyle: LineStyle.Dotted,
-            axisLabelVisible: true,
-            title: `${c.side === "short" ? "S" : "L"} ${fmtUsd(c.usd)}`,
-          }),
-        );
-      });
-  }, [analysis, on.liq, sym]);
-
-  // FPP for this coin and timeframe. Opens room right of the live candle for the path, and gives it back when off.
-  useEffect(() => {
-    fppRead.current = null;
-    fppCb.current?.(null);
-    if (!on.fpp) {
-      api.current?.chart.timeScale().applyOptions({ rightOffset: baseOffset.current });
-      paint(false);
-      return;
-    }
-    let dead = false;
-    let framed = false;
-    const load = async () => {
-      try {
-        const r = (await (await fetch(`/api/fpp?sym=${sym}&tf=${tf}`)).json()) as FppRead & { error?: string };
-        if (dead || !r.candles) return;
-        fppRead.current = r;
-        fppCb.current?.(r);
-        const a = api.current;
-        if (a && !framed) {
-          framed = true;
-          const need = r.horizon + 6;
-          a.chart.timeScale().applyOptions({ rightOffset: Math.max(baseOffset.current, need) });
-          const n = bars.current.length;
-          if (n) a.chart.timeScale().setVisibleLogicalRange({ from: n - 150, to: n + need });
-        }
-        paint(false);
-      } catch {
-        /* the next refresh retries */
-      }
-    };
-    void load();
-    const id = setInterval(load, 60000);
-    return () => {
-      dead = true;
-      clearInterval(id);
-      fppRead.current = null;
-      fppCb.current?.(null);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [on.fpp, sym, tf]);
-
   // Wick flow and sweeps for this coin and timeframe, refreshed while the toggle is on.
   useEffect(() => {
     wickRead.current = null;
@@ -1550,12 +1516,11 @@ function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, gok
     ["zones", "ZONES"],
     ["fvg", "FVG"],
     ["wicks", "WICKS"],
-    ["fpp", "FPP"],
+    ["ew", "ELLIOTT"],
     ["ema", "EMA"],
     ["ribbon", "AVWAP"],
     ["vp", "VP"],
     ["tpo", "TPO"],
-    ["liq", "LIQ"],
   ];
   return (
     <>
