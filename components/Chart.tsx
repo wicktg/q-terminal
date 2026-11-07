@@ -27,6 +27,7 @@ import ZoneCard, { type CardZone } from "./ZoneCard.tsx";
 import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
 import { wickTag, wickText, type WickEvent, type WickRead } from "@/lib/wicks.ts";
 import type { FppRead } from "@/lib/fpp.ts";
+import { GOKU_HOLD, readGoku, type GokuRead, type GokuView } from "@/lib/goku.ts";
 
 const TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
 const TF_SEC: Record<(typeof TFS)[number], number> = { "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
@@ -548,13 +549,179 @@ class PaneLabel implements ISeriesPrimitive<Time> {
   }
 }
 
-type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void; onFpp?: (f: FppRead | null) => void };
+type Target = { useBitmapCoordinateSpace: (f: (s: { context: CanvasRenderingContext2D; horizontalPixelRatio: number; verticalPixelRatio: number; bitmapSize: { width: number; height: number } }) => void) => void };
 
-export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }: Props) {
+// Shaded zones and guide lines across a pane, in its series' units: the Stoch RSI and WaveTrend bands.
+class Bands implements ISeriesPrimitive<Time> {
+  private p: SeriesAttachedParameter<Time> | null = null;
+  private fills: { from: number; to: number; color: string }[];
+  private lines: { v: number; color: string; dash?: boolean }[];
+  constructor(fills: { from: number; to: number; color: string }[], lines: { v: number; color: string; dash?: boolean }[]) {
+    this.fills = fills;
+    this.lines = lines;
+  }
+  attached(p: SeriesAttachedParameter<Time>) {
+    this.p = p;
+  }
+  detached() {
+    this.p = null;
+  }
+  updateAllViews() {}
+  paneViews() {
+    return [{ zOrder: () => "bottom" as const, renderer: () => ({ draw: (t: never) => this.draw(t) }) }];
+  }
+  private draw(target: Target) {
+    const p = this.p;
+    if (!p) return;
+    target.useBitmapCoordinateSpace(({ context: c, verticalPixelRatio: vr, bitmapSize }) => {
+      for (const f of this.fills) {
+        const a = p.series.priceToCoordinate(f.from);
+        const b = p.series.priceToCoordinate(f.to);
+        if (a === null || b === null) continue;
+        c.fillStyle = f.color;
+        c.fillRect(0, Math.min(a, b) * vr, bitmapSize.width, Math.abs(b - a) * vr);
+      }
+      for (const l of this.lines) {
+        const y = p.series.priceToCoordinate(l.v);
+        if (y === null) continue;
+        c.strokeStyle = l.color;
+        c.lineWidth = Math.max(1, vr);
+        c.setLineDash(l.dash ? [4 * vr, 4 * vr] : []);
+        c.beginPath();
+        c.moveTo(0, Math.round(y * vr) + 0.5);
+        c.lineTo(bitmapSize.width, Math.round(y * vr) + 0.5);
+        c.stroke();
+      }
+      c.setLineDash([]);
+    });
+  }
+}
+
+// WaveTrend cross dots and divergence tags (R regular, H hidden), green bullish and red bearish.
+class OscMarks implements ISeriesPrimitive<Time> {
+  d: { dots: { t: number; v: number; bull: boolean; zone: boolean }[]; divs: { t: number; v: number; bull: boolean; hidden: boolean }[] } = { dots: [], divs: [] };
+  private p: SeriesAttachedParameter<Time> | null = null;
+  attached(p: SeriesAttachedParameter<Time>) {
+    this.p = p;
+  }
+  detached() {
+    this.p = null;
+  }
+  update(d: OscMarks["d"]) {
+    this.d = d;
+    this.p?.requestUpdate();
+  }
+  updateAllViews() {}
+  paneViews() {
+    return [{ zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.draw(t) }) }];
+  }
+  private draw(target: Target) {
+    const p = this.p;
+    if (!p) return;
+    const tsc = p.chart.timeScale();
+    target.useBitmapCoordinateSpace(({ context: c, horizontalPixelRatio: hr, verticalPixelRatio: vr, bitmapSize }) => {
+      for (const d of this.d.dots) {
+        const x = tsc.timeToCoordinate(ts(d.t));
+        const y = p.series.priceToCoordinate(d.v);
+        if (x === null || y === null || x < 0 || x * hr > bitmapSize.width) continue;
+        const col = d.bull ? "#2bbf85" : "#e5534b";
+        c.beginPath();
+        c.arc(x * hr, y * vr, (d.zone ? 4.5 : 2.6) * hr, 0, Math.PI * 2);
+        c.fillStyle = d.zone ? (d.bull ? "rgba(43,191,133,0.35)" : "rgba(229,83,75,0.35)") : "#000";
+        c.fill();
+        c.lineWidth = 1.4 * hr;
+        c.strokeStyle = col;
+        c.stroke();
+      }
+      c.font = `600 ${10 * vr}px monospace`;
+      c.textAlign = "center";
+      c.textBaseline = "middle";
+      for (const d of this.d.divs) {
+        const x = tsc.timeToCoordinate(ts(d.t));
+        const y = p.series.priceToCoordinate(d.v);
+        if (x === null || y === null || x < 0 || x * hr > bitmapSize.width) continue;
+        const s = 13;
+        const cy = y + (d.bull ? 13 : -13);
+        c.fillStyle = d.bull ? "#16a06a" : "#c8322b";
+        c.fillRect((x - s / 2) * hr, (cy - s / 2) * vr, s * hr, s * vr);
+        c.fillStyle = "#fff";
+        c.fillText(d.hidden ? "H" : "R", x * hr, cy * vr + 0.5);
+      }
+      c.textAlign = "left";
+      c.textBaseline = "alphabetic";
+    });
+  }
+}
+
+// GOKU signals as solid triangles: BUY under the candle, SELL over it, bigger when strong.
+class GokuMarks implements ISeriesPrimitive<Time> {
+  d: { t: number; side: 1 | -1; strong: boolean; h: number; l: number }[] = [];
+  private p: SeriesAttachedParameter<Time> | null = null;
+  attached(p: SeriesAttachedParameter<Time>) {
+    this.p = p;
+  }
+  detached() {
+    this.p = null;
+  }
+  update(d: GokuMarks["d"]) {
+    this.d = d;
+    this.p?.requestUpdate();
+  }
+  updateAllViews() {}
+  paneViews() {
+    return [{ zOrder: () => "top" as const, renderer: () => ({ draw: (t: never) => this.draw(t) }) }];
+  }
+  private draw(target: Target) {
+    const p = this.p;
+    if (!p) return;
+    const tsc = p.chart.timeScale();
+    target.useBitmapCoordinateSpace(({ context: c, horizontalPixelRatio: hr, verticalPixelRatio: vr }) => {
+      for (const m of this.d) {
+        const x = tsc.timeToCoordinate(ts(m.t));
+        const y = p.series.priceToCoordinate(m.side > 0 ? m.l : m.h);
+        if (x === null || y === null) continue;
+        const s = m.strong ? 17 : 12;
+        const tip = y + (m.side > 0 ? 7 : -7);
+        const base = tip + (m.side > 0 ? s : -s);
+        c.beginPath();
+        c.moveTo(x * hr, tip * vr);
+        c.lineTo((x - s * 0.62) * hr, base * vr);
+        c.lineTo((x + s * 0.62) * hr, base * vr);
+        c.closePath();
+        c.fillStyle = m.side > 0 ? "#18d26e" : "#ff2d2d";
+        c.fill();
+        c.lineWidth = hr;
+        c.strokeStyle = "rgba(0,0,0,0.7)";
+        c.stroke();
+      }
+    });
+  }
+}
+
+const BASE_ON = { struct: true, zones: true, fvg: true, wicks: false, fpp: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false };
+type On = typeof BASE_ON;
+const ALL_OFF: On = { struct: false, zones: false, fvg: false, wicks: false, fpp: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false };
+type GokuApi = { fast: ISeriesApi<"Line">; slow: ISeriesApi<"Line">; k: ISeriesApi<"Line">; d: ISeriesApi<"Line">; w1: ISeriesApi<"Line">; w2: ISeriesApi<"Line">; osc: OscMarks; marks: GokuMarks; lines: IPriceLine[] };
+
+type Props = { sym: string; analysis: Analysis | null; onPrice: (p: number) => void; digits?: number; onWicks?: (w: WickRead | null) => void; onFpp?: (f: FppRead | null) => void; onGoku?: (g: GokuView | null) => void };
+
+// GOKU swaps the whole pane layout, so flipping it rebuilds the chart. Toggles, timeframe and coin are kept.
+export default function Chart(props: Props) {
+  const [goku, setGoku] = useState(() => stored("q.goku") === "1");
+  const flip = () =>
+    setGoku((g) => {
+      store("q.goku", g ? "0" : "1");
+      return !g;
+    });
+  return <ChartView key={goku ? "goku" : "std"} {...props} goku={goku} onGokuFlip={flip} />;
+}
+
+function ChartView({ sym, analysis, onPrice, digits, onWicks, onFpp, onGoku, goku, onGokuFlip }: Props & { goku: boolean; onGokuFlip: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const legend = useRef<HTMLDivElement>(null);
   const flowCanvas = useRef<HTMLCanvasElement>(null);
-  const [flow, setFlow] = useState(() => stored("q.flow") === "1");
+  const [flowPref, setFlow] = useState(() => stored("q.flow") === "1");
+  const flow = flowPref && !goku; // GOKU runs on its own, so HL FLOW waits
   const [minUsd, setMinUsd] = useState(() => Number(stored("q.flowMin") ?? 1000) || 0);
   const minRef = useRef(minUsd);
   minRef.current = minUsd;
@@ -563,8 +730,8 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
     const t = stored("q.chart.tf");
     return (TFS as readonly string[]).includes(t ?? "") ? (t as (typeof TFS)[number]) : "1h";
   });
-  const [on, setOn] = useState(() => {
-    const base = { struct: true, zones: true, fvg: true, wicks: false, fpp: false, ema: false, ribbon: false, vp: false, tpo: false, liq: false };
+  const [onPref, setOn] = useState(() => {
+    const base = { ...BASE_ON };
     try {
       const saved = JSON.parse(stored("q.chart.on") ?? "{}") as Partial<typeof base>;
       for (const k of Object.keys(base) as (keyof typeof base)[]) if (typeof saved[k] === "boolean") base[k] = saved[k];
@@ -573,7 +740,9 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
     }
     return base;
   });
-  useEffect(() => store("q.chart.on", JSON.stringify(on)), [on]);
+  // With GOKU on every other overlay is off; the saved choices come back when it is turned off.
+  const on = goku ? ALL_OFF : onPref;
+  useEffect(() => store("q.chart.on", JSON.stringify(onPref)), [onPref]);
   useEffect(() => store("q.chart.tf", tf), [tf]);
   const [feed, setFeed] = useState<"LIVE" | "POLL" | "NOT ON HL" | "...">("...");
   const api = useRef<{
@@ -585,10 +754,11 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
     aHi: ISeriesApi<"Line">;
     aLo: ISeriesApi<"Line">;
     vol: ISeriesApi<"Histogram">;
-    cvdP: ISeriesApi<"Line">;
-    cvdS: ISeriesApi<"Line">;
+    cvdP: ISeriesApi<"Line"> | null;
+    cvdS: ISeriesApi<"Line"> | null;
     overlay: Overlay;
-    cvdTag: PaneLabel;
+    cvdTag: PaneLabel | null;
+    g: GokuApi | null;
     flow: FlowLayer;
     liq: IPriceLine[];
   } | null>(null);
@@ -614,6 +784,9 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
   const baseOffset = useRef(REST_OFFSET);
   const wicksCb = useRef(onWicks);
   wicksCb.current = onWicks;
+  const gokuCb = useRef(onGoku);
+  gokuCb.current = onGoku;
+  const gokuRead = useRef<GokuRead | null>(null);
   const priceCb = useRef(onPrice);
   priceCb.current = onPrice;
 
@@ -650,18 +823,52 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
     const e200 = line("#808080", 1);
     const aHi = line("#f5a623", 1);
     const aLo = line("#f5a623", 1, 0, LineStyle.Dashed);
-    const vol = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceLineVisible: false, lastValueVisible: false }, 1);
-    const cvdP = chart.addSeries(LineSeries, { color: "#f5a623", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" } }, 2);
-    const cvdS = chart.addSeries(LineSeries, { color: "#5b9cf6", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" }, priceScaleId: "left" }, 2);
-    const panes = chart.panes();
-    [7, 1.2, 2].forEach((f, i) => panes[i]?.setStretchFactor(f));
     const overlay = new Overlay();
     candle.attachPrimitive(overlay);
-    vol.attachPrimitive(new PaneLabel([{ text: "VOLUME", color: "#808080" }]));
-    const cvdTag = new PaneLabel(CVD_TAGS);
-    cvdP.attachPrimitive(cvdTag);
     const flowLayer = new FlowLayer(flowCanvas.current!, chart, candle);
-    api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP, cvdS, overlay, cvdTag, flow: flowLayer, liq: [] };
+    if (goku) {
+      // GOKU: volume along the foot of the price pane, then a Stoch RSI pane and a WaveTrend pane.
+      const vol = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "gvol", priceLineVisible: false, lastValueVisible: false }, 0);
+      vol.priceScale().applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
+      const thick = (w: 2 | 3 | 4, pane: number, color = "#2bbf85") => chart.addSeries(LineSeries, { color, lineWidth: w, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }, pane);
+      const fixed = (lo: number, hi: number) => (orig: () => { priceRange: { minValue: number; maxValue: number } } | null) => {
+        const r = orig();
+        return { priceRange: { minValue: Math.min(lo, r?.priceRange.minValue ?? lo), maxValue: Math.max(hi, r?.priceRange.maxValue ?? hi) } };
+      };
+      const slow = thick(4, 0);
+      const fast = thick(3, 0);
+      const k = chart.addSeries(LineSeries, { color: "#5b9cf6", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: fixed(0, 100) }, 1);
+      const d = chart.addSeries(LineSeries, { color: "#f5a623", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }, 1);
+      const w2 = chart.addSeries(LineSeries, { color: "#e6e6e6", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: fixed(-100, 100) }, 2);
+      const w1 = thick(2, 2);
+      chart.panes().forEach((pane, i) => pane.setStretchFactor([6, 1.4, 1.9][i] ?? 1));
+      for (const ser of [k, w2]) ser.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.04 } });
+      k.attachPrimitive(new Bands([{ from: 20, to: 80, color: "rgba(91,156,246,0.06)" }], [{ v: 80, color: "#3a3a3a", dash: true }, { v: 50, color: "#1f1f1f", dash: true }, { v: 20, color: "#3a3a3a", dash: true }]));
+      k.attachPrimitive(new PaneLabel([{ text: "STOCH RSI", color: "#808080" }, { text: "━ K", color: "#5b9cf6" }, { text: "━ D", color: "#f5a623" }]));
+      w2.attachPrimitive(
+        new Bands(
+          [{ from: 53, to: 60, color: "rgba(229,83,75,0.13)" }, { from: 60, to: 100, color: "rgba(229,83,75,0.24)" }, { from: -60, to: -53, color: "rgba(43,191,133,0.13)" }, { from: -100, to: -60, color: "rgba(43,191,133,0.24)" }],
+          [{ v: 0, color: "#333" }],
+        ),
+      );
+      w2.attachPrimitive(new PaneLabel([{ text: "WAVETREND", color: "#808080" }, { text: "━ WT", color: "#2bbf85" }, { text: "━ SIGNAL", color: "#e6e6e6" }, { text: "● cross  R regular  H hidden", color: "#555555" }]));
+      const osc = new OscMarks();
+      w1.attachPrimitive(osc);
+      const marks = new GokuMarks();
+      candle.attachPrimitive(marks);
+      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP: null, cvdS: null, overlay, cvdTag: null, g: { fast, slow, k, d, w1, w2, osc, marks, lines: [] }, flow: flowLayer, liq: [] };
+    } else {
+      const vol = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceLineVisible: false, lastValueVisible: false }, 1);
+      const cvdP = chart.addSeries(LineSeries, { color: "#f5a623", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" } }, 2);
+      const cvdS = chart.addSeries(LineSeries, { color: "#5b9cf6", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" }, priceScaleId: "left" }, 2);
+      const panes = chart.panes();
+      [7, 1.2, 2].forEach((f, i) => panes[i]?.setStretchFactor(f));
+      vol.attachPrimitive(new PaneLabel([{ text: "VOLUME", color: "#808080" }]));
+      const cvdTag = new PaneLabel(CVD_TAGS);
+      cvdP.attachPrimitive(cvdTag);
+      api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP, cvdS, overlay, cvdTag, g: null, flow: flowLayer, liq: [] };
+    }
+    if (!goku) gokuCb.current?.(null);
 
     const pointAt = (p: { point?: { x: number; y: number }; paneIndex?: number }) => {
       if (!p.point || (p.paneIndex !== undefined && p.paneIndex !== 0)) return null;
@@ -744,7 +951,9 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
     const d = taker ? delta(taker) : 0;
     const wk = onRef.current.wicks ? (wickRead.current?.events ?? []).filter((e) => e.t === b.t) : [];
     const wickLines = wk.map((e) => `<div class="lg-wick ${e.side === "upper" ? "down" : "up"}">${wickText(e, fmtPx, fmtUsd)}</div>`).join("");
-    L.innerHTML = `O<b>${fmtPx(b.o)}</b>H<b>${fmtPx(b.h)}</b>L<b>${fmtPx(b.l)}</b>C<b>${fmtPx(b.c)}</b><b class="${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</b>VOL<b>${fmtUsd(b.q)}</b>DELTA<b class="${d >= 0 ? "up" : "down"}">${fmtUsd(d)}</b>${wickLines}`;
+    const gs = goku ? gokuRead.current?.signals.find((x) => x.t === b.t) : undefined;
+    const gokuLine = gs ? `<div class="lg-wick ${gs.side > 0 ? "up" : "down"}">GOKU ${gs.side > 0 ? "BUY" : "SELL"}${gs.strong ? " (strong)" : ""}: ${gs.why.slice(1, -1).join(" · ") || gs.why[0]}</div>` : "";
+    L.innerHTML = `O<b>${fmtPx(b.o)}</b>H<b>${fmtPx(b.h)}</b>L<b>${fmtPx(b.l)}</b>C<b>${fmtPx(b.c)}</b><b class="${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</b>VOL<b>${fmtUsd(b.q)}</b>DELTA<b class="${d >= 0 ? "up" : "down"}">${fmtUsd(d)}</b>${wickLines}${gokuLine}`;
   };
 
   // Builds the ruler readout: price move, percent, bars and elapsed time.
@@ -821,17 +1030,17 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
       a.aHi.setData(onRef.current.ribbon ? AH.map((p) => ({ time: ts(p.t), value: p.v })) : []);
       a.aLo.setData(onRef.current.ribbon ? AL.map((p) => ({ time: ts(p.t), value: p.v })) : []);
       a.vol.setData(vols);
-      a.cvdP.setData(T.map((b, i) => ({ time: ts(b.t), value: CV[i] })));
-      a.cvdS.setData(spotLine);
+      a.cvdP?.setData(T.map((b, i) => ({ time: ts(b.t), value: CV[i] })));
+      a.cvdS?.setData(spotLine);
     } else {
       const n = B.length - 1;
       const t = ts(B[n].t);
       a.candle.update(candles[n]);
       a.vol.update(vols[n]);
       const m = T.length - 1;
-      a.cvdP.update({ time: ts(T[m].t), value: CV[m] });
+      a.cvdP?.update({ time: ts(T[m].t), value: CV[m] });
       const sv = SP[m];
-      if (sv !== null) a.cvdS.update({ time: ts(T[m].t), value: sv });
+      if (sv !== null) a.cvdS?.update({ time: ts(T[m].t), value: sv });
       if (showE) {
         a.e20.update({ time: t, value: E20[n] });
         a.e50.update({ time: t, value: E50[n] });
@@ -846,7 +1055,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
     const lm = new Map(AL.map((p) => [p.t, p.v]));
     a.overlay.update({
       ribbon: B.filter((b) => hm.has(b.t) && lm.has(b.t)).map((b) => ({ t: b.t, a: hm.get(b.t)!, b: lm.get(b.t)! })),
-      ...(full ? readChart(B, tfRef.current) : {}),
+      ...(full && !goku ? readChart(B, tfRef.current) : {}),
       profile: full ? volumeProfile(B.slice(-360)) : a.overlay.d.profile,
       times: B.map((b) => b.t),
       showRibbon: onRef.current.ribbon,
@@ -866,8 +1075,60 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
         zoneLoad.current?.();
       }
     }
+    if (a.g) paintGoku(a.g, full);
     priceCb.current(B[B.length - 1].c);
     renderLegend();
+  };
+
+  // GOKU lines on every tick; dots, tags, signals, levels and the side panel when a candle closes.
+  const paintGoku = (g: GokuApi, full: boolean) => {
+    const a = api.current;
+    const B = bars.current;
+    if (!a || B.length < 30) return;
+    const r = readGoku(B, { closed: B.length - 1, hold: GOKU_HOLD[tfRef.current] });
+    gokuRead.current = r;
+    const UP = "#2bbf85";
+    const DN = "#e5534b";
+    const slope = (v: number[], up: string, dn: string) => (i: number) => (i && v[i] < v[i - 1] ? dn : up);
+    const rows: [ISeriesApi<"Line">, number[], ((i: number) => string) | null][] = [
+      [g.fast, r.fast, slope(r.fast, UP, DN)],
+      [g.slow, r.slow, slope(r.slow, "#159a63", "#b5352f")],
+      [g.k, r.k, null],
+      [g.d, r.d, null],
+      [g.w1, r.wt1, slope(r.wt1, UP, DN)],
+      [g.w2, r.wt2, null],
+    ];
+    const at = (v: number[], col: ((i: number) => string) | null, i: number) => (col ? { time: ts(B[i].t), value: v[i], color: col(i) } : { time: ts(B[i].t), value: v[i] });
+    if (!full) {
+      const i = B.length - 1;
+      for (const [s, v, col] of rows) if (Number.isFinite(v[i])) s.update(at(v, col, i));
+      return;
+    }
+    for (const [s, v, col] of rows) s.setData(B.flatMap((_, i) => (Number.isFinite(v[i]) ? [at(v, col, i)] : [])));
+    const closed = B.length - 1;
+    g.osc.update({
+      dots: r.crosses.filter((x) => x.i < closed).map((x) => ({ t: B[x.i].t, v: r.wt2[x.i], bull: x.bull, zone: x.zone })),
+      divs: r.divs.map((d) => ({ t: B[d.i].t, v: r.wt2[d.i], bull: d.bull, hidden: d.hidden })),
+    });
+    g.marks.update(r.signals.map((s) => ({ t: s.t, side: s.side, strong: s.strong, h: B[s.i].h, l: B[s.i].l })));
+    g.lines.forEach((l) => a.candle.removePriceLine(l));
+    g.lines = [];
+    if (r.res) g.lines.push(a.candle.createPriceLine({ price: r.res.price, color: "rgba(229,83,75,0.85)", lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "RES" }));
+    if (r.sup) g.lines.push(a.candle.createPriceLine({ price: r.sup.price, color: "rgba(43,191,133,0.85)", lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "SUP" }));
+    const last = r.signals.at(-1) ?? null;
+    const div = r.divs.at(-1);
+    gokuCb.current?.({
+      sym,
+      tf: tfRef.current,
+      px: B[B.length - 1].c,
+      last,
+      ago: last ? closed - last.i : 0,
+      div: div ? { ...div, ago: closed - div.i } : null,
+      res: r.res,
+      sup: r.sup,
+      stats: r.stats,
+      now: r.now,
+    });
   };
 
   // load history and stay live for this symbol + timeframe
@@ -1042,7 +1303,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
     };
     const start = async () => {
       setFeed("...");
-      api.current?.cvdTag.set(flow ? HL_CVD_TAGS : CVD_TAGS);
+      api.current?.cvdTag?.set(flow ? HL_CVD_TAGS : CVD_TAGS);
       if (flow) api.current?.flow.start();
       try {
         const [r, t] = await Promise.all([
@@ -1059,7 +1320,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
         const dp = pxDigits(r.bars[r.bars.length - 1].c, sym);
         a?.candle.applyOptions({ priceFormat: { type: "price", precision: dp, minMove: 10 ** -dp } });
         // Dragging a price axis switches auto-scale off, which would strand the new coin off screen.
-        if (a) for (const s of [a.candle, a.vol, a.cvdP, a.cvdS]) s.priceScale().applyOptions({ autoScale: true });
+        if (a) for (const s of [a.candle, a.vol, a.cvdP, a.cvdS]) s?.priceScale().applyOptions({ autoScale: true });
         if (a) {
           // HL FLOW opens a lane right of the live candle for fills to travel through.
           const width = Math.max(320, a.chart.timeScale().width());
@@ -1284,7 +1545,7 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
     };
   }, [on.tpo, sym]);
 
-  const toggles: [keyof typeof on, string][] = [
+  const toggles: [keyof On, string][] = [
     ["struct", "STRUCTURE"],
     ["zones", "ZONES"],
     ["fvg", "FVG"],
@@ -1309,13 +1570,17 @@ export default function Chart({ sym, analysis, onPrice, digits, onWicks, onFpp }
           MEASURE
         </button>
         <span className="sep" />
+        <button className="goku-btn" data-on={goku} title="GOKU: trend EMAs, Stoch RSI, WaveTrend, divergences and key levels in one read. Turns the other overlays off." onClick={onGokuFlip}>
+          GOKU
+        </button>
+        <span className="sep" />
         {toggles.map(([k, label]) => (
-          <button key={k} data-on={on[k]} onClick={() => setOn((s) => ({ ...s, [k]: !s[k] }))}>
+          <button key={k} data-on={onPref[k]} disabled={goku} title={goku ? "Off while GOKU is on" : undefined} onClick={() => setOn((s) => ({ ...s, [k]: !s[k] }))}>
             {label}
           </button>
         ))}
         <span className="sep" />
-        <button data-on={flow} title="Hyperliquid candles, fills and order book" onClick={() => setFlow((f) => { store("q.flow", f ? "0" : "1"); return !f; })}>
+        <button data-on={flowPref} disabled={goku} title={goku ? "Off while GOKU is on" : "Hyperliquid candles, fills and order book"} onClick={() => setFlow((f) => { store("q.flow", f ? "0" : "1"); return !f; })}>
           HL FLOW
         </button>
         {flow && (

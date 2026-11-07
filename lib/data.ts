@@ -25,23 +25,6 @@ export function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>): Pro
   return p;
 }
 
-// Like cached, but when a refresh fails it serves the last good value for up to maxAgeMs, so a brief rate limit
-// upstream does not take the page down.
-const good = new Map<string, { at: number; v: unknown }>();
-export function cachedSticky<T>(key: string, ttlMs: number, fn: () => Promise<T>, maxAgeMs = 10 * 60e3): Promise<T> {
-  return cached(key, ttlMs, async () => {
-    try {
-      const v = await fn();
-      good.set(key, { at: Date.now(), v });
-      return v;
-    } catch (e) {
-      const g = good.get(key);
-      if (g && Date.now() - g.at < maxAgeMs) return g.v as T;
-      throw e;
-    }
-  });
-}
-
 async function json<T = unknown>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, { ...init, signal: AbortSignal.timeout(12000), cache: "no-store" });
   if (!r.ok) throw new Error(`${r.status} ${url}`);

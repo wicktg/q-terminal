@@ -6,6 +6,7 @@ import TpoTab from "./TpoTab.tsx";
 import { useJson } from "./use-json.ts";
 import { wickText, type WickRead } from "@/lib/wicks.ts";
 import type { FppRead } from "@/lib/fpp.ts";
+import type { GokuView } from "@/lib/goku.ts";
 import type { Analysis, Book, Forecast, Frame, NewsItem, NewsResp, ScreenerRow, UniverseCoin } from "@/lib/types.ts";
 import { fmtPct, fmtPx, fmtUsd, pxDigits, setActiveSym, setPriceDigits, toneClass } from "@/lib/format.ts";
 import { DEFAULT_LIST } from "@/lib/coins.ts";
@@ -118,7 +119,60 @@ function FppPanel({ f }: { f: FppRead }) {
   );
 }
 
-function StructurePanel({ a, price, wicks, fpp }: { a: Analysis | null; price: number; wicks?: WickRead | null; fpp?: FppRead | null }) {
+function GokuPanel({ g }: { g: GokuView }) {
+  const s = g.stats;
+  const pc = (x: number) => `${Math.round(x * 100)}%`;
+  const L = g.last;
+  const z = s.n ? (s.hit - s.base) / Math.sqrt(0.25 / s.n) : 0;
+  const edge = s.n >= 20 && s.hit >= s.base + 0.05 && z >= 1.65 && s.raceN >= 10 && s.race > 0.5;
+  const kZone = g.now.k <= 20 ? "oversold" : g.now.k >= 80 ? "overbought" : "mid-range";
+  const wZone = g.now.wt2 <= -53 ? "oversold" : g.now.wt2 >= 53 ? "overbought" : "neutral";
+  const touches = (n: number) => `${n} touch${n === 1 ? "" : "es"}`;
+  return (
+    <>
+      <div className="h">GOKU<span>{g.tf.toUpperCase()} · trend, momentum, divergence, levels</span></div>
+      <div className="goku-call">
+        {L ? (
+          <>
+            <b className={L.side > 0 ? "up" : "down"}>{L.side > 0 ? "▲ BUY" : "▼ SELL"}{L.strong ? " · STRONG" : ""}</b>
+            <span>{g.ago === 0 ? "on the last closed candle" : `${g.ago} candle${g.ago === 1 ? "" : "s"} ago`} at <b>{fmtPx(L.px)}</b></span>
+          </>
+        ) : (
+          <b className="dim">No signal on these candles</b>
+        )}
+      </div>
+      {L && (
+        <ul className="goku-why">
+          {L.why.map((w) => <li key={w}>{w}</li>)}
+        </ul>
+      )}
+      <table className="stat goku-stats">
+        <tbody>
+          <tr><td>Trend</td><td className={g.now.trend > 0 ? "up" : g.now.trend < 0 ? "down" : ""}>{g.now.trend > 0 ? "Up, fast EMA over slow" : g.now.trend < 0 ? "Down, fast EMA under slow" : "Mixed"}, fast {g.now.fastUp ? "rising" : "falling"}</td></tr>
+          <tr><td>Stoch RSI</td><td>K {Math.round(g.now.k)} · D {Math.round(g.now.d)}, {kZone}</td></tr>
+          <tr><td>WaveTrend</td><td>{Math.round(g.now.wt1)} / {Math.round(g.now.wt2)}, {wZone}</td></tr>
+          <tr><td>Divergence</td><td>{g.div ? `${g.div.hidden ? "Hidden" : "Regular"} ${g.div.bull ? "bullish" : "bearish"}, ${g.div.ago} candles ago` : "None recently"}</td></tr>
+          <tr><td>Resistance</td><td className="down">{g.res ? `${fmtPx(g.res.price)}, ${touches(g.res.touches)}` : "—"}</td></tr>
+          <tr><td>Support</td><td className="up">{g.sup ? `${fmtPx(g.sup.price)}, ${touches(g.sup.touches)}` : "—"}</td></tr>
+        </tbody>
+      </table>
+      <div className={`fpp-verdict ${edge ? "up" : ""}`}>
+        {s.n ? (
+          <>
+            Track record on these candles: {s.n} signal{s.n === 1 ? "" : "s"}, {pc(s.hit)} closed their way after {s.hold} candles against {pc(s.base)} for the base rate, and {pc(s.race)} of {s.raceN} moved 1 ATR their way before 1 ATR against.
+            {s.strongN ? ` Strong ones: ${pc(s.strongHit)} of ${s.strongN}.` : ""}
+            {edge ? " Better than chance on this coin and timeframe, but small samples fade." : " No proven edge here, so treat signals as places to look, not orders."}
+          </>
+        ) : (
+          "No finished signals on these candles yet."
+        )}
+      </div>
+      <div className="note">A signal needs WaveTrend to cross out of an extreme plus one confirmation (Stoch RSI turning in its zone, a divergence, or a tested level) with the trend, or two against it. Signals use closed candles only and never repaint. Across 16 coins and four timeframes they tested close to a coin flip, slightly better on 4H and 1D. Open interest, funding, liquidations and long/short ratios are not used.</div>
+    </>
+  );
+}
+
+function StructurePanel({ a, price, wicks, fpp, goku }: { a: Analysis | null; price: number; wicks?: WickRead | null; fpp?: FppRead | null; goku?: GokuView | null }) {
   if (!a) return <Loading />;
   const px = price || a.price;
   const above = a.ta.zones.filter((z) => z.dist > 0).slice(0, 3).reverse();
@@ -134,6 +188,7 @@ function StructurePanel({ a, price, wicks, fpp }: { a: Analysis | null; price: n
   );
   return (
     <>
+      {goku && goku.sym === a.sym && <GokuPanel g={goku} />}
       <div className="h">STRUCTURE</div>
       {a.ta.frames.map((f) => <FrameRow key={f.tf} f={f} />)}
       <div className="h">KEY ZONES<span>{fmtPx(px)}</span></div>
@@ -496,6 +551,7 @@ export default function Terminal() {
   const [open, setOpen] = useState(false);
   const [live, setLive] = useState<number | null>(null);
   const [wicks, setWicks] = useState<WickRead | null>(null);
+  const [goku, setGoku] = useState<GokuView | null>(null);
   const [fpp, setFpp] = useState<FppRead | null>(null);
   const [tick, setTick] = useState<Record<string, Tick>>({});
   const tickAt = useRef(0);
@@ -616,7 +672,6 @@ export default function Terminal() {
         <span className="price">{price ? fmtPx(price) : "—"}</span>
         <span className={toneClass(chg)}>{fmtPct(chg)}</span>
         {a?.ta.frames.map((f) => <span key={f.tf} className="kv"><span className="hide-m">{f.tf} </span><b className={trendTone(f.trend)}>{arrow(f.trend)}</b></span>)}
-        <a className="hm-link" href={`/hyper?sym=${sym}`}>HYPERMODE</a>
         <span className="status">{err ? "DATA ERROR" : a ? new Date(a.asOf).toLocaleTimeString("en-GB") : "LOADING"}</span>
       </header>
 
@@ -657,8 +712,8 @@ export default function Terminal() {
         <main className={`main ${tab === "CHART" || tab === "TPO" ? "fill" : ""}`}>
           {tab === "CHART" && (
             <>
-              <Chart sym={sym} analysis={a} onPrice={setLive} digits={pxDigits(price || 1, sym)} onWicks={setWicks} onFpp={setFpp} />
-              <div className="ctx-inline"><StructurePanel a={a} price={price} wicks={wicks} fpp={fpp} /></div>
+              <Chart sym={sym} analysis={a} onPrice={setLive} digits={pxDigits(price || 1, sym)} onWicks={setWicks} onFpp={setFpp} onGoku={setGoku} />
+              <div className="ctx-inline"><StructurePanel a={a} price={price} wicks={wicks} fpp={fpp} goku={goku} /></div>
             </>
           )}
           {tab === "ZONES" && <Zones sym={sym} a={a} />}
@@ -669,7 +724,7 @@ export default function Terminal() {
           {tab === "CONTEXT" && <ContextTab a={a} sym={sym} />}
         </main>
 
-        <section className="ctx"><StructurePanel a={a} price={price} wicks={wicks} fpp={fpp} /></section>
+        <section className="ctx"><StructurePanel a={a} price={price} wicks={wicks} fpp={fpp} goku={goku} /></section>
       </div>
 
       <nav className="mob-nav">
