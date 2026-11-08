@@ -11,12 +11,16 @@ import type { Analysis, Book, Forecast, Frame, NewsItem, NewsResp, ScreenerRow, 
 import { fmtPct, fmtPx, fmtUsd, pxDigits, setActiveSym, setPriceDigits, toneClass } from "@/lib/format.ts";
 import { DEFAULT_LIST } from "@/lib/coins.ts";
 import CloseTimers from "./CloseTimers.tsx";
+import { IconChart, IconChevron, IconInfo, IconLevels, IconNews, IconScan, IconSearch } from "./Icons.tsx";
 
 const Chart = dynamic(() => import("./Chart"), { ssr: false });
 
 // Applied once to watchlists saved earlier, so a later manual add or remove sticks.
 const LIST_CHANGES = ["+1000PEPE", "+AERO", "+VVV", "+UNI", "-AVAX", "-XRP", "-BNB", "+ZRO"];
 const TABS = ["CHART", "ZONES", "TPO", "ABSORB", "SCAN", "NEWS", "CONTEXT"] as const;
+// Phones get five tabs: zones, the market profile and absorption share one Levels tab with a switch at its top.
+const LEVELS = ["ZONES", "TPO", "ABSORB"] as const;
+const LEVEL_NAMES: Record<(typeof LEVELS)[number], string> = { ZONES: "Zones", TPO: "Profile", ABSORB: "Absorb" };
 type Tab = (typeof TABS)[number];
 const TICKER_WS = "wss://fstream.binance.com/market/ws/!miniTicker@arr"; // every perp, about once a second
 const TICKER_STALE_MS = 15e3;
@@ -489,7 +493,7 @@ function Screener({ list, onPick }: { list: string[]; onPick: (s: string) => voi
     <div style={{ overflowX: "auto" }}>
       <table className="tbl">
         <thead>
-          <tr><th>Coin</th><th className="r">Price</th><th className="r">24H</th>{tfs.map((t) => <th key={t} className="r">{t}</th>)}<th>Latest shift</th></tr>
+          <tr><th>Coin</th><th className="r">Price</th><th className="r">24H</th>{tfs.map((t) => <th key={t} className="r">{t}</th>)}<th className="m-hide">Latest shift</th></tr>
         </thead>
         <tbody>
           {data.map((r) => (
@@ -498,7 +502,7 @@ function Screener({ list, onPick }: { list: string[]; onPick: (s: string) => voi
               <td className="r">{fmtPx(r.price, r.sym)}</td>
               <td className={`r ${toneClass(r.chg24h)}`}>{fmtPct(r.chg24h)}</td>
               {r.frames.map((f) => <td key={f.tf} className={`r ${trendTone(f.trend)}`}>{arrow(f.trend)}</td>)}
-              <td className="dim">{r.event}</td>
+              <td className="dim m-hide">{r.event}</td>
             </tr>
           ))}
         </tbody>
@@ -567,7 +571,7 @@ function News({ news, err, sym }: { news: NewsResp | null; err: boolean; sym: st
   const rows = news.items.filter(test);
   return (
     <>
-      <div className="chart-bar">
+      <div className="chart-bar news-bar">
         {FILTERS.map((x) => (
           <button key={x} data-on={x === f} onClick={() => setF(x)}>{x}</button>
         ))}
@@ -594,6 +598,7 @@ export default function Terminal() {
   const [list, setList] = useState(DEFAULT_LIST);
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
+  const [lastLevel, setLastLevel] = useState<(typeof LEVELS)[number]>("ZONES");
   const [live, setLive] = useState<number | null>(null);
   const [wicks, setWicks] = useState<WickRead | null>(null);
   const [goku, setGoku] = useState<GokuView | null>(null);
@@ -695,6 +700,11 @@ export default function Terminal() {
     };
   }, []);
 
+  useEffect(() => {
+    if ((LEVELS as readonly string[]).includes(tab)) setLastLevel(tab as (typeof LEVELS)[number]);
+  }, [tab]);
+  const isLevel = (LEVELS as readonly string[]).includes(tab);
+
   useMemo(() => uni && setPriceDigits(uni), [uni]);
   setActiveSym(sym); // prices on this page format to the selected coin's tick unless told otherwise
 
@@ -714,10 +724,13 @@ export default function Terminal() {
     <div className="app">
       <header className="topbar">
         <span className="brand hide-m">Q</span>
-        <button className="sym" onClick={() => setOpen((o) => !o)}>{sym}</button>
+        <button className="sym" onClick={() => setOpen((o) => !o)} aria-label={`${sym}, change coin`}>
+          {sym}
+          <IconChevron className="m-only sym-chev" />
+        </button>
         <span className="price">{price ? fmtPx(price) : "—"}</span>
-        <span className={toneClass(chg)}>{fmtPct(chg)}</span>
-        {a?.ta.frames.map((f) => <span key={f.tf} className="kv"><span className="hide-m">{f.tf} </span><b className={trendTone(f.trend)}>{arrow(f.trend)}</b></span>)}
+        <span className={`chg ${toneClass(chg)}`}>{fmtPct(chg)}</span>
+        {a?.ta.frames.map((f) => <span key={f.tf} className="kv hide-m">{f.tf} <b className={trendTone(f.trend)}>{arrow(f.trend)}</b></span>)}
         <CloseTimers active={chartTf} />
         <span className="status">{err ? "DATA ERROR" : a ? new Date(a.asOf).toLocaleTimeString("en-GB") : "LOADING"}</span>
       </header>
@@ -736,8 +749,17 @@ export default function Terminal() {
       </nav>
 
       <div className="body">
+        <div className={`m-backdrop m-only ${open ? "on" : ""}`} onClick={() => setOpen(false)} />
         <aside className={`side ${open ? "open" : ""}`}>
-          <input ref={search} className="search" placeholder="Search / to focus" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search coins" />
+          <div className="sheet-grip m-only" />
+          <div className="sheet-head m-only">
+            <b>Markets</b>
+            <button onClick={() => setOpen(false)}>Done</button>
+          </div>
+          <label className="search-wrap">
+            <IconSearch className="m-only" />
+            <input ref={search} className="search" placeholder="Search / to focus" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search coins" />
+          </label>
           <div className="wl">
             {(results ?? list.map((s) => byS.get(s) ?? { sym: s, price: 0, chg24h: 0, vol24hUsd: 0, funding: 0 })).map((c) => {
               const p = priceOf(c.sym, c.price);
@@ -746,7 +768,7 @@ export default function Terminal() {
               <div key={c.sym} className="wl-row" data-on={c.sym === sym} role="button" tabIndex={0} onClick={() => pick(c.sym)} onKeyDown={(e) => e.key === "Enter" && pick(c.sym)}>
                 <span className="n">{c.sym}</span>
                 <span>{p ? fmtPx(p, c.sym) : "—"}</span>
-                <span className={toneClass(ch)} style={{ minWidth: 52, textAlign: "right" }}>{fmtPct(ch, 1)}</span>
+                <span className={`wl-chg ${toneClass(ch)}`}>{fmtPct(ch, 1)}</span>
                 {results && !list.includes(c.sym) && (
                   <button className="wl-x" style={{ gridColumn: 3 }} onClick={(e) => { e.stopPropagation(); saveList([...list, c.sym]); }}>+ add</button>
                 )}
@@ -757,6 +779,13 @@ export default function Terminal() {
         </aside>
 
         <main className={`main ${tab === "CHART" || tab === "TPO" ? "fill" : ""}`}>
+          {isLevel && (
+            <div className="m-seg m-only" role="tablist">
+              {LEVELS.map((t) => (
+                <button key={t} role="tab" data-on={t === tab} onClick={() => setTab(t)}>{LEVEL_NAMES[t]}</button>
+              ))}
+            </div>
+          )}
           {tab === "CHART" && (
             <>
               <Chart sym={sym} onPrice={setLive} digits={pxDigits(price || 1, sym)} onWicks={setWicks} onEw={setEw} onTf={setChartTf} onGoku={setGoku} />
@@ -775,9 +804,23 @@ export default function Terminal() {
       </div>
 
       <nav className="mob-nav">
-        {TABS.map((t) => (
-          <button key={t} data-on={t === tab} onClick={() => setTab(t)}>{t === "CONTEXT" ? "INFO" : t}</button>
-        ))}
+        {(
+          [
+            ["CHART", "Chart", IconChart],
+            ["LEVELS", "Levels", IconLevels],
+            ["SCAN", "Scan", IconScan],
+            ["NEWS", "News", IconNews],
+            ["CONTEXT", "Info", IconInfo],
+          ] as const
+        ).map(([k, label, Icon]) => {
+          const on = k === "LEVELS" ? isLevel : tab === k;
+          return (
+            <button key={k} data-on={on} aria-current={on ? "page" : undefined} onClick={() => setTab(k === "LEVELS" ? lastLevel : k)}>
+              <Icon />
+              <span>{label}</span>
+            </button>
+          );
+        })}
       </nav>
     </div>
   );

@@ -24,6 +24,7 @@ import { poolsAt, walk, zonesAt } from "@/lib/structure.ts";
 import { fmtPx, fmtUsd, hlBar, hlName, pxDigits, type HlCandle } from "@/lib/format.ts";
 import { FlowLayer } from "./flow-layer.ts";
 import { clock, closesIn } from "./CloseTimers.tsx";
+import { IconLayers } from "./Icons.tsx";
 import ZoneCard, { type CardZone } from "./ZoneCard.tsx";
 import { tpoLevels, type TpoBar } from "@/lib/tpo.ts";
 import { wickTag, wickText, type WickEvent, type WickRead } from "@/lib/wicks.ts";
@@ -39,11 +40,13 @@ const FULL_PAINT_MS = 400;
 const POLL_AFTER_MS = 12e3; // no ticks for this long means the feed is the poll, not the socket
 const RECONNECT_AFTER_MS = 30e3;
 const VIEW_BARS = 160;
+const VIEW_BARS_M = 90; // phones open on fewer candles so each one is wide enough to read
 const REST_OFFSET = 8;
 const HL_WS = "wss://api.hyperliquid.xyz/ws";
 const HL_PING_MS = 30e3; // Hyperliquid drops sockets that stay silent for a minute
 const FILL_GROUP_MS = 150; // one order arrives as many fills, across more than one message
 const CVD_TAGS = [{ text: "━ CVD PERP", color: "#f5a623" }, { text: "━ CVD SPOT", color: "#5b9cf6" }, { text: "each on its own scale", color: "#555555" }];
+const CVD_TAGS_M = [{ text: "━ CVD PERP", color: "#f5a623" }, { text: "━ SPOT", color: "#5b9cf6" }];
 const HL_CVD_TAGS = [...CVD_TAGS.slice(0, 2), { text: "Binance taker flow", color: "#555555" }]; // Hyperliquid publishes no taker history
 const ts = (t: number) => t as UTCTimestamp;
 
@@ -96,6 +99,7 @@ type Draw = {
   showStruct: boolean;
   showVp: boolean;
   times: number[];
+  compact: boolean; // phones: short labels lined up on the right, fewer swing labels
 };
 
 // Draws one band where two of the same kind mostly cover each other.
@@ -134,7 +138,7 @@ function readChart(B: Bar[], tf: string) {
 
 // Draws what lightweight-charts has no series for: ribbon fill, order blocks, volume profile.
 class Overlay implements ISeriesPrimitive<Time> {
-  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zoneUsd: {}, ew: null, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [] };
+  d: Draw = { ribbon: [], wicks: [], showWicks: false, measure: null, measureHint: null, zoneUsd: {}, ew: null, zones: [], gaps: [], swings: [], pools: [], profile: null, showRibbon: false, showZones: true, showFvg: true, showStruct: true, showVp: false, times: [], compact: false };
   private p: SeriesAttachedParameter<Time> | null = null;
   attached(p: SeriesAttachedParameter<Time>) {
     this.p = p;
@@ -489,7 +493,8 @@ class Overlay implements ISeriesPrimitive<Time> {
         return { left, top: top * vr, w: W - left, h: Math.max(1, (bot - top) * vr) };
       };
       const labels: { text: string; color: string; x: number; y: number }[] = [];
-      c.font = `${10 * vr}px monospace`;
+      const cm = this.d.compact;
+      c.font = `${(cm ? 9 : 10) * vr}px monospace`;
       c.lineWidth = hr;
       if (this.d.showFvg) {
         for (const g of this.d.gaps) {
@@ -500,7 +505,7 @@ class Overlay implements ISeriesPrimitive<Time> {
           c.fillStyle = "rgba(91,156,246,0.6)";
           c.fillRect(r.left, r.top, r.w, 1);
           c.fillRect(r.left, r.top + r.h, r.w, 1);
-          labels.push({ text: `FVG ${g.side > 0 ? "↑" : "↓"}`, color: "#5b9cf6", x: r.left + 4 * hr, y: r.top + 2 * vr });
+          labels.push({ text: cm ? "FVG" : `FVG ${g.side > 0 ? "↑" : "↓"}`, color: "#5b9cf6", x: r.left + 4 * hr, y: r.top + 2 * vr });
         }
       }
       if (this.d.showZones) {
@@ -537,7 +542,7 @@ class Overlay implements ISeriesPrimitive<Time> {
             c.setLineDash([]);
           }
           const amt = this.d.zoneUsd[`${z.top}|${z.bottom}`];
-          const name = z.kind === "OB" ? (up ? "DEMAND OB" : "SUPPLY OB") : up ? "DEMAND" : "SUPPLY";
+          const name = cm ? (z.kind === "OB" ? "OB" : up ? "DEM" : "SUP") : z.kind === "OB" ? (up ? "DEMAND OB" : "SUPPLY OB") : up ? "DEMAND" : "SUPPLY";
           labels.push({ text: amt ? `${name} ${fmtUsd(amt.usd)}${amt.complete ? "" : "+"}` : name, color: up ? "#2bbf85" : "#e5534b", x: r.left + 4 * hr, y: r.top + 2 * vr });
         }
       }
@@ -553,21 +558,23 @@ class Overlay implements ISeriesPrimitive<Time> {
         }
       }
       // Labels go last on dark chips and step aside from each other, so overlapping zones stay named.
-      const chipH = 13 * vr;
+      // On phones they form a column at the left edge, over older candles, and step right when they meet.
+      const chipH = (cm ? 11 : 13) * vr;
+      const pad = (cm ? 3 : 4) * hr;
       const placed: { x: number; y: number; w: number }[] = [];
       for (const l of labels) {
-        const w = c.measureText(l.text).width + 8 * hr;
-        let lx = l.x;
+        const w = c.measureText(l.text).width + 2 * pad;
+        let lx = cm ? 4 * hr : l.x;
         for (let hit = true; hit; ) {
           const p = placed.find((q) => Math.abs(q.y - l.y) < chipH && lx < q.x + q.w && lx + w > q.x);
           hit = !!p;
-          if (p) lx = p.x + p.w + 3 * hr;
+          if (p) lx = p.x + p.w + (cm ? 2 : 3) * hr;
         }
         placed.push({ x: lx, y: l.y, w });
-        c.fillStyle = "rgba(0,0,0,0.8)";
+        c.fillStyle = cm ? "rgba(0,0,0,0.72)" : "rgba(0,0,0,0.8)";
         c.fillRect(lx, l.y, w, chipH);
         c.fillStyle = l.color;
-        c.fillText(l.text, lx + 4 * hr, l.y + 10 * vr);
+        c.fillText(l.text, lx + pad, l.y + (cm ? 8.5 : 10) * vr);
       }
       if (this.d.showStruct) {
         c.font = `${10 * vr}px monospace`;
@@ -578,8 +585,11 @@ class Overlay implements ISeriesPrimitive<Time> {
           c.fillStyle = "rgba(128,128,128,0.5)";
           for (let q = Math.max(0, x0 * hr); q < W; q += 8 * hr) c.fillRect(q, yy * vr, 3 * hr, 1);
         }
-        c.fillStyle = "#808080";
-        for (const q of this.d.swings) {
+        // Phones show only the latest four swing labels, quieter, so the candles stay readable.
+        c.fillStyle = cm ? "#5c5c5c" : "#808080";
+        if (cm) c.font = `${9 * vr}px monospace`;
+        const swings = cm ? this.d.swings.filter((q) => q.label.length >= 2).slice(-4) : this.d.swings;
+        for (const q of swings) {
           const yy = y(q.price);
           const xx = x(q.t);
           if (yy === null || xx === null || q.label.length < 2) continue;
@@ -820,15 +830,24 @@ type Props = { sym: string; onPrice: (p: number) => void; digits?: number; onWic
 // GOKU swaps the whole pane layout, so flipping it rebuilds the chart. Toggles, timeframe and coin are kept.
 export default function Chart(props: Props) {
   const [goku, setGoku] = useState(() => stored("q.goku") === "1");
+  // Phones get a leaner layout (volume inside the price pane, a smaller CVD pane), so crossing the width rebuilds.
+  const [compact, setCompact] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 720px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 720px)");
+    const on = () => setCompact(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
   const flip = () =>
     setGoku((g) => {
       store("q.goku", g ? "0" : "1");
       return !g;
     });
-  return <ChartView key={goku ? "goku" : "std"} {...props} goku={goku} onGokuFlip={flip} />;
+  return <ChartView key={`${goku ? "goku" : "std"}-${compact ? "m" : "d"}`} {...props} goku={goku} compact={compact} onGokuFlip={flip} />;
 }
 
-function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, onGokuFlip }: Props & { goku: boolean; onGokuFlip: () => void }) {
+function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, compact, onGokuFlip }: Props & { goku: boolean; compact: boolean; onGokuFlip: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const legend = useRef<HTMLDivElement>(null);
   const flowCanvas = useRef<HTMLCanvasElement>(null);
@@ -883,6 +902,7 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
   const tfRef = useRef(tf);
   tfRef.current = tf;
   const [measureOn, setMeasureOn] = useState(false);
+  const [layersOpen, setLayersOpen] = useState(false); // the layers sheet on phones
   const [card, setCard] = useState<CardZone | null>(null);
   const zoneLoad = useRef<(() => void) | null>(null);
   const zoneKey = useRef("");
@@ -913,14 +933,14 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
       layout: {
         background: { type: ColorType.Solid, color: "#000000" },
         textColor: "#808080",
-        fontSize: 11,
+        fontSize: compact ? 10 : 11,
         fontFamily: getComputedStyle(document.body).fontFamily,
         panes: { separatorColor: "#1e1e1e", separatorHoverColor: "#2c2c2c" },
         attributionLogo: false,
       },
       grid: { vertLines: { color: "#0e0e0e" }, horzLines: { color: "#0e0e0e" } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#444", labelBackgroundColor: "#2c2c2c" }, horzLine: { color: "#444", labelBackgroundColor: "#2c2c2c" } },
-      rightPriceScale: { borderColor: "#1e1e1e" },
+      rightPriceScale: { borderColor: "#1e1e1e", ...(compact ? { scaleMargins: { top: 0.06, bottom: 0.04 } } : {}) },
       timeScale: { borderColor: "#1e1e1e", timeVisible: true, secondsVisible: false, rightOffset: REST_OFFSET },
     });
     const line = (color: string, width: 1 | 2, pane = 0, style: LineStyle = LineStyle.Solid) =>
@@ -958,7 +978,7 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
       const d = chart.addSeries(LineSeries, { color: "#f5a623", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }, 1);
       const w2 = chart.addSeries(LineSeries, { color: "#e6e6e6", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: fixed(-100, 100) }, 2);
       const w1 = thick(2, 2);
-      chart.panes().forEach((pane, i) => pane.setStretchFactor([6, 1.4, 1.9][i] ?? 1));
+      chart.panes().forEach((pane, i) => pane.setStretchFactor((compact ? [7, 1.5, 1.8] : [6, 1.4, 1.9])[i] ?? 1));
       for (const ser of [k, w2]) ser.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.04 } });
       k.attachPrimitive(new Bands([{ from: 20, to: 80, color: "rgba(91,156,246,0.06)" }], [{ v: 80, color: "#3a3a3a", dash: true }, { v: 50, color: "#1f1f1f", dash: true }, { v: 20, color: "#3a3a3a", dash: true }]));
       k.attachPrimitive(new PaneLabel([{ text: "STOCH RSI", color: "#808080" }, { text: "━ K", color: "#5b9cf6" }, { text: "━ D", color: "#f5a623" }]));
@@ -975,13 +995,17 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
       candle.attachPrimitive(marks);
       api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP: null, cvdS: null, overlay, cvdTag: null, g: { fast, slow, k, d, w1, w2, osc, marks, lines: [] }, clock: closeClock, flow: flowLayer };
     } else {
-      const vol = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceLineVisible: false, lastValueVisible: false }, 1);
-      const cvdP = chart.addSeries(LineSeries, { color: "#f5a623", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" } }, 2);
-      const cvdS = chart.addSeries(LineSeries, { color: "#5b9cf6", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" }, priceScaleId: "left" }, 2);
+      const cvdPane = compact ? 1 : 2;
+      const vol = compact
+        ? chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "vol", priceLineVisible: false, lastValueVisible: false }, 0)
+        : chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceLineVisible: false, lastValueVisible: false }, 1);
+      if (compact) vol.priceScale().applyOptions({ scaleMargins: { top: 0.86, bottom: 0 } });
+      const cvdP = chart.addSeries(LineSeries, { color: "#f5a623", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" } }, cvdPane);
+      const cvdS = chart.addSeries(LineSeries, { color: "#5b9cf6", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "volume" }, priceScaleId: "left" }, cvdPane);
       const panes = chart.panes();
-      [7, 1.2, 2].forEach((f, i) => panes[i]?.setStretchFactor(f));
-      vol.attachPrimitive(new PaneLabel([{ text: "VOLUME", color: "#808080" }]));
-      const cvdTag = new PaneLabel(CVD_TAGS);
+      (compact ? [8, 1.9] : [7, 1.2, 2]).forEach((f, i) => panes[i]?.setStretchFactor(f));
+      if (!compact) vol.attachPrimitive(new PaneLabel([{ text: "VOLUME", color: "#808080" }]));
+      const cvdTag = new PaneLabel(compact ? CVD_TAGS_M : CVD_TAGS);
       cvdP.attachPrimitive(cvdTag);
       api.current = { chart, candle, e20, e50, e200, aHi, aLo, vol, cvdP, cvdS, overlay, cvdTag, g: null, clock: closeClock, flow: flowLayer };
     }
@@ -1070,7 +1094,9 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
     const wickLines = wk.map((e) => `<div class="lg-wick ${e.side === "upper" ? "down" : "up"}">${wickText(e, fmtPx, fmtUsd)}</div>`).join("");
     const gs = goku ? gokuRead.current?.signals.find((x) => x.t === b.t) : undefined;
     const gokuLine = gs ? `<div class="lg-wick ${gs.side > 0 ? "up" : "down"}">GOKU ${gs.side > 0 ? "BUY" : "SELL"}${gs.strong ? " (strong)" : ""}: ${gs.why.slice(1, -1).join(" · ") || gs.why[0]}</div>` : "";
-    L.innerHTML = `O<b>${fmtPx(b.o)}</b>H<b>${fmtPx(b.h)}</b>L<b>${fmtPx(b.l)}</b>C<b>${fmtPx(b.c)}</b><b class="${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</b>VOL<b>${fmtUsd(b.q)}</b>DELTA<b class="${d >= 0 ? "up" : "down"}">${fmtUsd(d)}</b>${wickLines}${gokuLine}`;
+    // Phones show the close and change at rest, and the full candle while a finger is on the chart.
+    L.classList.toggle("hov", hover.current !== null);
+    L.innerHTML = `<span class="lg-o">O<b>${fmtPx(b.o)}</b>H<b>${fmtPx(b.h)}</b>L<b>${fmtPx(b.l)}</b></span>C<b>${fmtPx(b.c)}</b><b class="${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</b><span class="lg-x">VOL<b>${fmtUsd(b.q)}</b>DELTA<b class="${d >= 0 ? "up" : "down"}">${fmtUsd(d)}</b></span>${wickLines}${gokuLine}`;
   };
 
   // Builds the ruler readout: price move, percent, bars and elapsed time.
@@ -1183,6 +1209,7 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
       wicks: onRef.current.wicks ? mapWicks() : [],
       ew: ewDraw(full),
       showWicks: onRef.current.wicks,
+      compact,
     });
     // New or moved zones fetch their resting size straight away rather than at the next refresh.
     if (full) {
@@ -1451,7 +1478,7 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
     };
     const start = async () => {
       setFeed("...");
-      api.current?.cvdTag?.set(flow ? HL_CVD_TAGS : CVD_TAGS);
+      api.current?.cvdTag?.set(compact ? CVD_TAGS_M : flow ? HL_CVD_TAGS : CVD_TAGS);
       if (flow) api.current?.flow.start();
       try {
         const [r, t] = await Promise.all([
@@ -1473,9 +1500,10 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
           // HL FLOW opens a lane right of the live candle for fills to travel through.
           const width = Math.max(320, a.chart.timeScale().width());
           const lane = flow ? Math.min(260, Math.max(130, width * 0.34)) : 0;
-          const rightOffset = flow ? Math.round((VIEW_BARS * lane) / (width - lane)) : REST_OFFSET;
+          const view = compact ? VIEW_BARS_M : VIEW_BARS;
+          const rightOffset = flow ? Math.round((view * lane) / (width - lane)) : REST_OFFSET;
           a.chart.timeScale().applyOptions({ rightOffset });
-          a.chart.timeScale().setVisibleLogicalRange({ from: r.bars.length - VIEW_BARS, to: r.bars.length + rightOffset });
+          a.chart.timeScale().setVisibleLogicalRange({ from: r.bars.length - view, to: r.bars.length + rightOffset });
         }
       } catch {
         if (!dead) {
@@ -1663,60 +1691,76 @@ function ChartView({ sym, onPrice, digits, onWicks, onEw, onGoku, onTf, goku, on
     };
   }, [on.tpo, sym]);
 
-  const toggles: [keyof On, string][] = [
-    ["struct", "STRUCTURE"],
-    ["zones", "ZONES"],
-    ["fvg", "FVG"],
-    ["wicks", "WICKS"],
-    ["ew", "ELLIOTT"],
-    ["ema", "EMA"],
-    ["ribbon", "AVWAP"],
-    ["vp", "VP"],
-    ["tpo", "TPO"],
+  const toggles: [keyof On, string, string][] = [
+    ["struct", "STRUCTURE", "Swings and breaks"],
+    ["zones", "ZONES", "Supply, demand, blocks"],
+    ["fvg", "FVG", "Fair value gaps"],
+    ["wicks", "WICKS", "Wick flow, sweeps"],
+    ["ew", "ELLIOTT", "Top-down wave count"],
+    ["ema", "EMA", "20, 50, 200 EMAs"],
+    ["ribbon", "AVWAP", "Anchored VWAPs"],
+    ["vp", "VP", "Volume profile"],
+    ["tpo", "TPO", "Profile levels"],
   ];
+  const layerCount = (goku ? 1 : toggles.filter(([k]) => onPref[k]).length) + (flow ? 1 : 0);
   return (
     <>
       <div className="chart-bar">
-        {TFS.map((t) => (
-          <button key={t} data-on={t === tf} onClick={() => setTf(t)}>
-            {t.toUpperCase()}
+        <span className="tf-seg">
+          {TFS.map((t) => (
+            <button key={t} data-on={t === tf} onClick={() => setTf(t)}>
+              {t.toUpperCase()}
+            </button>
+          ))}
+        </span>
+        <span className="sep" />
+        {/* Inline on wide screens; a sheet of tiles on phones. */}
+        <div className={`chart-layers ${layersOpen ? "open" : ""}`}>
+          <div className="sheet-grip m-only" />
+          <div className="sheet-head m-only">
+            <b>Chart layers</b>
+            <button onClick={() => setLayersOpen(false)}>Done</button>
+          </div>
+          <button data-on={measureOn} title="Measure a move: click a start and an end. Shift-click works any time, Esc clears." onClick={() => { setMeasureOn((v) => !v); setLayersOpen(false); }}>
+            MEASURE<small>Ruler: price, %, time</small>
           </button>
-        ))}
-        <span className="sep" />
-        <button data-on={measureOn} title="Measure a move: click a start and an end. Shift-click works any time, Esc clears." onClick={() => setMeasureOn((v) => !v)}>
-          MEASURE
-        </button>
-        <span className="sep" />
-        <button className="goku-btn" data-on={goku} title="GOKU: trend EMAs, Stoch RSI, WaveTrend, divergences and key levels in one read. Turns the other overlays off." onClick={onGokuFlip}>
-          GOKU
-        </button>
-        <span className="sep" />
-        {toggles.map(([k, label]) => (
-          <button key={k} data-on={onPref[k]} disabled={goku} title={goku ? "Off while GOKU is on" : undefined} onClick={() => setOn((s) => ({ ...s, [k]: !s[k] }))}>
-            {label}
+          <span className="sep" />
+          <button className="goku-btn" data-on={goku} title="GOKU: trend EMAs, Stoch RSI, WaveTrend, divergences and key levels in one read. Turns the other overlays off." onClick={onGokuFlip}>
+            GOKU<small>Indicator mix, others off</small>
           </button>
-        ))}
-        <span className="sep" />
-        <button data-on={flowPref} disabled={goku} title={goku ? "Off while GOKU is on" : "Hyperliquid candles, fills and order book"} onClick={() => setFlow((f) => { store("q.flow", f ? "0" : "1"); return !f; })}>
-          HL FLOW
+          <span className="sep" />
+          {toggles.map(([k, label, desc]) => (
+            <button key={k} data-on={onPref[k]} disabled={goku} title={goku ? "Off while GOKU is on" : undefined} onClick={() => setOn((s) => ({ ...s, [k]: !s[k] }))}>
+              {label}<small>{desc}</small>
+            </button>
+          ))}
+          <span className="sep" />
+          <button data-on={flowPref} disabled={goku} title={goku ? "Off while GOKU is on" : "Hyperliquid candles, fills and order book"} onClick={() => setFlow((f) => { store("q.flow", f ? "0" : "1"); return !f; })}>
+            HL FLOW<small>Hyperliquid fills, book</small>
+          </button>
+          {flow && (
+            <label className="flow-min">
+              MIN $
+              <input
+                inputMode="numeric"
+                aria-label="Minimum order size in dollars"
+                value={minUsd || ""}
+                onChange={(e) => {
+                  const v = Number(e.target.value.replace(/\D/g, ""));
+                  setMinUsd(v);
+                  store("q.flowMin", String(v));
+                }}
+              />
+            </label>
+          )}
+        </div>
+        {layersOpen && <div className="sheet-backdrop m-only" onClick={() => setLayersOpen(false)} />}
+        <button className="layers-btn m-only" onClick={() => setLayersOpen(true)} aria-label="Chart layers">
+          <IconLayers size={18} />
+          {layerCount > 0 && <b>{layerCount}</b>}
         </button>
-        {flow && (
-          <label className="flow-min">
-            MIN $
-            <input
-              inputMode="numeric"
-              aria-label="Minimum order size in dollars"
-              value={minUsd || ""}
-              onChange={(e) => {
-                const v = Number(e.target.value.replace(/\D/g, ""));
-                setMinUsd(v);
-                store("q.flowMin", String(v));
-              }}
-            />
-          </label>
-        )}
         <span className="sep" />
-        <span className={feed === "LIVE" ? "up" : "dim"} style={{ fontSize: 11 }}>
+        <span className={`feed ${feed === "LIVE" ? "up" : "dim"}`} style={{ fontSize: 11 }}>
           {flow && feed === "LIVE" ? "HL " : ""}{feed}
         </span>
       </div>
